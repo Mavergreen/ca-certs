@@ -1,0 +1,5 @@
+/VERSION
+/UPSTREAM_VERSION
+.superpowers/
+._*
+.idea/
