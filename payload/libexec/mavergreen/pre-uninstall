@@ -1,0 +1,28 @@
+#!/bin/sh
+# platform: macOS-only -- undoes admin trust through /usr/bin/security
+#   usage: pre-uninstall       (run by `mavergreen uninstall ca-certs`, with MAVERGREEN_ROOT set)
+#          Undoes exactly what var/ca-certs/receipt records, dropping each entry as it is undone,
+#          so a retry after a failure resumes. Refuses, keeping the receipt, when the changes were
+#          made to a system other than the one this runs on.
+# spec: tests/pre-uninstall.sh
+# spec: docs/TRUST-POLICY.md #9 -- recorded changes on a volume that is not the running system are refused, not skipped: exit 0 would let uninstall delete the record
+set -eu
+CA_ROOT="${MAVERGREEN_ROOT:-/}"; CA_ROOT="${CA_ROOT%/}"
+. "$(cd "$(dirname "$0")/.." && pwd)/ca-certs-lib.sh"
+# spec: docs/TRUST-POLICY.md #9 -- a receipt that exists but cannot be read dies here
+#       (ca_receipt_changes exits 1), so the uninstall stops with the record and every change in place
+ca_receipt_changes || exit 0
+ca_is_booted_root || ca_die "the trust changes in $CA_RECEIPT belong to the system on $CA_ROOT/; boot from it and run 'mavergreen uninstall ca-certs' there. Nothing was removed."
+for kind in trusted denied; do
+  recorded="$(ca_receipt_list "$kind")"
+  for sha in $recorded; do
+    ca_undo_setting "$sha"
+    ca_receipt_drop "$kind" "$sha"
+  done
+done
+imported="$(ca_receipt_list imported)"
+for sha in $imported; do
+  ca_undo_import "$sha"
+  ca_receipt_drop imported "$sha"
+done
+echo "ca-certs: every recorded trust change is undone" >&2
