@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>Mavergreen/shipyard"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^NSS_TAG$/"],
+      "matchStrings": ["^\\s*(?<currentValue>NSS_\\S+_RTM)\\s*$"],
+      "depNameTemplate": "nss",
+      "packageNameTemplate": "mozilla/nss",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "regex:^NSS_(?<major>\\d+)_(?<minor>\\d+)(?:_(?<patch>\\d+))?_RTM$"
+    }
+  ]
+}
