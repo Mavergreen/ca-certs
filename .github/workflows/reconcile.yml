@@ -1,0 +1,32 @@
+name: reconcile
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+# spec: mavergreen-conventions SKILL.md "A release is a declared state, not an event" -- a called
+#       workflow gets no more than its caller grants, so the nightly backstop needs these here
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  reconcile:
+    permissions:
+      contents: read
+      actions: write
+    uses: Mavergreen/shipyard/.github/workflows/reconcile.yml@v1
+    with:
+      # spec: tests/release-workflow.sh -- shipyard's reconcile.yml default (local_release=true)
+      #       always cuts N+1 with no gate; our release.yml gates a reconcile=true dispatch on
+      #       release-needed.sh instead, so a nightly dispatch this workflow makes AFTER a
+      #       push-triggered release has already published the declared state finds that release
+      #       and skips, rather than cutting a second one carrying the same content. This does NOT
+      #       cover the two runs OVERLAPPING: while a push-triggered release.yml run is still
+      #       building, release-needed.sh sees no published release yet either way, so a nightly
+      #       dispatch that lands during that window can still cut one extra release with the same
+      #       content -- conventions check 1b's per-run concurrency (release-${{ github.run_id }},
+      #       cancel-in-progress: false) keeps two publishes from racing the SAME run, but does not
+      #       serialize this workflow's dispatch against a separate, already-running release.yml.
+      dispatch-field: reconcile=true

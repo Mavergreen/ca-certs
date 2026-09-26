@@ -1,0 +1,2 @@
+VERSION    # release.yml's ver step stamps the resolved version here; mavericks_resolve_version (CMakeLists.txt) reads it back; gitignored
+UPSTREAM_VERSION    # build/derive-upstream-version.sh stamps NSS_TAG's three-part version here; shipyard's version.sh reads it back; gitignored
