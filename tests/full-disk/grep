@@ -1,0 +1,4 @@
+#!/bin/sh
+# platform: macOS-only -- runs /usr/bin/grep with no room to write, for tests (see tests/lib/full-disk.sh)
+#   usage: PATH="$R/tests/full-disk:$PATH" FULL_DISK_ON=TEXT ...
+FULL_DISK_TOOL=/usr/bin/grep exec sh "${0%/*}/../lib/full-disk.sh" "$@"

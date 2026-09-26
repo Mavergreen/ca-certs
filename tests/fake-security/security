@@ -1,0 +1,94 @@
+#!/bin/sh
+# platform: host-agnostic
+#   usage: security SUBCOMMAND ...     (a stand-in for /usr/bin/security in tests)
+#          State in $FAKE_SEC_STATE: `admin` holds "SHA1 RESULT [POLICY]" per admin trust setting;
+#          `keychain` holds one SHA1 per certificate in System.keychain; `log` gets every call.
+#          $FAKE_SEC_ROOT/Library/Security/Trust Settings/Admin.plist exists exactly when `admin`
+#          is non-empty, as on a real system -- unless FAKE_SEC_KEEP_EMPTY_ADMIN_FILE=1, which
+#          leaves it behind empty, as real 10.9 may do after the last setting is removed.
+#          FAKE_SEC_SILENT_ADD=SHA1        add-trusted-cert exits 0 for that certificate and does nothing
+#          FAKE_SEC_FAIL_ADD=SHA1          add-trusted-cert exits 1 for that certificate, cleanly:
+#                                          no admin setting and no keychain import happen at all
+#          FAKE_SEC_FAIL_AFTER_IMPORT=SHA1 add-trusted-cert imports into the keychain, then exits 1
+#          FAKE_SEC_FAIL_REMOVE=SHA1       remove-trusted-cert exits 1 for that certificate
+#          FAKE_SEC_FAIL_DELETE=SHA1       delete-certificate exits 1 for that certificate
+#          FAKE_SEC_EMPTY_EXPORT=1         trust-settings-export exits 0 but writes an empty file
+#          FAKE_SEC_FAIL_ONCE=SUBCMD       the next call to SUBCMD exits 1, then behaves normally
+#          FAKE_SEC_FAIL_ONCE=SUBCMD:N     the Nth call to SUBCMD exits 1 (once), earlier and later
+#                                          calls behave normally -- e.g. :2 to fail a listing taken
+#                                          right AFTER a successful change, not the one before it
+#          remove-trusted-cert exits 1, unprompted, for a certificate with no admin setting, as the
+#          real tool very likely does.
+set -eu
+S="${FAKE_SEC_STATE:?}"
+touch "$S/admin" "$S/keychain"
+printf '%s\n' "$*" >> "$S/log"
+if [ -n "${FAKE_SEC_FAIL_ONCE:-}" ]; then
+  fo_sub="${FAKE_SEC_FAIL_ONCE%%:*}"
+  case "$FAKE_SEC_FAIL_ONCE" in *:*) fo_n="${FAKE_SEC_FAIL_ONCE#*:}" ;; *) fo_n=1 ;; esac
+  if [ "$1" = "$fo_sub" ] && [ ! -f "$S/fail-once-used" ]; then
+    fo_count="$(cat "$S/fail-once-count" 2>/dev/null || echo 0)"
+    fo_count=$((fo_count + 1))
+    printf '%s' "$fo_count" > "$S/fail-once-count"
+    if [ "$fo_count" = "$fo_n" ]; then
+      touch "$S/fail-once-used"
+      echo "fake security: $1 call #$fo_count failed (FAKE_SEC_FAIL_ONCE)" >&2
+      exit 1
+    fi
+  fi
+fi
+sha1_of() { openssl x509 -noout -fingerprint -sha1 -in "$1" | sed 's/.*=//' | tr -d :; }
+sync_admin_file() {
+  _f="${FAKE_SEC_ROOT:?}/Library/Security/Trust Settings/Admin.plist"
+  if [ -s "$S/admin" ] || [ -n "${FAKE_SEC_KEEP_EMPTY_ADMIN_FILE:-}" ]; then mkdir -p "${_f%/*}"; : > "$_f"; else rm -f "$_f"; fi
+}
+drop_admin() { grep -v "^$1 " "$S/admin" > "$S/admin.t" || :; mv "$S/admin.t" "$S/admin"; }
+cmd="$1"; shift
+case "$cmd" in
+  trust-settings-export)
+    [ "$1" = -d ] || exit 2
+    if [ -n "${FAKE_SEC_EMPTY_EXPORT:-}" ]; then : > "$2"; exit 0; fi
+    [ -s "$S/admin" ] || { echo "SecTrustSettingsCreateExternalRepresentation: No Trust Settings were found." >&2; exit 1; }
+    {
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+      printf '<plist version="1.0">\n<dict>\n<key>trustList</key>\n<dict>\n'
+      while read -r sha rest; do printf '<key>%s</key>\n<dict>\n<key>fake</key>\n<string>%s</string>\n</dict>\n' "$sha" "$rest"; done < "$S/admin"
+      printf '</dict>\n<key>trustVersion</key>\n<integer>1</integer>\n</dict>\n</plist>\n'
+    } > "$2" ;;
+  trust-settings-import)
+    [ "$1" = -d ] || exit 2
+    sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1 restored/p' "$2" > "$S/admin"
+    sync_admin_file ;;
+  add-trusted-cert)
+    r=""; p=""; f=""
+    while [ $# -gt 0 ]; do
+      case "$1" in -d) shift ;; -r) r="$2"; shift 2 ;; -p) p="$2"; shift 2 ;; -k) shift 2 ;; *) f="$1"; shift ;; esac
+    done
+    sha="$(sha1_of "$f")"
+    if [ "$sha" = "${FAKE_SEC_SILENT_ADD:-}" ]; then exit 0; fi
+    if [ "$sha" = "${FAKE_SEC_FAIL_ADD:-}" ]; then echo "fake security: add failed" >&2; exit 1; fi
+    if [ "$sha" = "${FAKE_SEC_FAIL_AFTER_IMPORT:-}" ]; then
+      grep -q "^$sha\$" "$S/keychain" || printf '%s\n' "$sha" >> "$S/keychain"
+      echo "fake security: add-trusted-cert failed after importing $sha" >&2
+      exit 1
+    fi
+    drop_admin "$sha"
+    printf '%s %s %s\n' "$sha" "$r" "$p" >> "$S/admin"
+    grep -q "^$sha\$" "$S/keychain" || printf '%s\n' "$sha" >> "$S/keychain"
+    sync_admin_file ;;
+  remove-trusted-cert)
+    [ "$1" = -d ] || exit 2
+    sha="$(sha1_of "$2")"
+    if [ "$sha" = "${FAKE_SEC_FAIL_REMOVE:-}" ]; then echo "fake security: remove failed" >&2; exit 1; fi
+    grep -q "^$sha " "$S/admin" || { echo "fake security: $sha has no admin trust setting" >&2; exit 1; }
+    drop_admin "$sha"
+    sync_admin_file ;;
+  find-certificate)
+    while read -r sha; do printf 'SHA-1 hash: %s\n' "$sha"; done < "$S/keychain" ;;
+  delete-certificate)
+    [ "$1" = -Z ] || exit 2
+    if [ "$2" = "${FAKE_SEC_FAIL_DELETE:-}" ]; then echo "fake security: delete failed" >&2; exit 1; fi
+    grep -q "^$2\$" "$S/keychain" || { echo "fake security: $2 not found" >&2; exit 44; }
+    grep -v "^$2\$" "$S/keychain" > "$S/k.t" || :; mv "$S/k.t" "$S/keychain" ;;
+  *) echo "fake security: unsupported $cmd" >&2; exit 2 ;;
+esac

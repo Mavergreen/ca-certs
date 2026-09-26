@@ -1,0 +1,13 @@
+#!/bin/sh
+# platform: macOS-only -- hands every call it does not fail to /usr/bin/grep
+#   usage: PATH="tests/fake-grep:$PATH" FAKE_GREP_ARM=FILE FAKE_GREP_FAIL_ON=TEXT ...
+#          A stand-in for grep in tests. While FILE exists, the first call whose arguments contain
+#          TEXT and name the receipt removes FILE and exits 2 with no output, as 10.9's grep does on a
+#          read error (an unreadable file); every other call is the real grep. A write that fails
+#          is tests/full-disk: 10.9's grep exits 0 then, so this shim does not model it.
+if [ -n "${FAKE_GREP_ARM:-}" ] && [ -f "$FAKE_GREP_ARM" ]; then
+  case "$*" in
+    *"${FAKE_GREP_FAIL_ON:?}"*receipt*) rm -f "$FAKE_GREP_ARM"; echo "grep: read error (fake grep)" >&2; exit 2 ;;
+  esac
+fi
+exec /usr/bin/grep "$@"

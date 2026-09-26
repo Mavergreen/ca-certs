@@ -1,0 +1,141 @@
+#!/bin/sh
+# platform: macOS-only -- changes admin trust through /usr/bin/security
+#   usage: ca-certs-apply --root VOLUME
+#          Brings VOLUME's admin trust settings to this release: trusts every root in
+#          share/ca-certs/trusted, distrusts every root in share/ca-certs/distrust for TLS, undoes
+#          what an earlier release did that this one no longer asks for, and records each change in
+#          var/ca-certs/receipt as it happens. Only on the running system of a Mac OS X 10.x install;
+#          elsewhere it records that it changed nothing.
+# spec: tests/apply.sh
+set -eu
+[ "${1:-}" = --root ] && [ -n "${2:-}" ] || { echo "usage: ca-certs-apply --root VOLUME" >&2; exit 2; }
+CA_ROOT="${2%/}"
+. "$(cd "$(dirname "$0")" && pwd)/ca-certs-lib.sh"
+mkdir -p "$CA_VAR/certs"
+nss="$(cat "$CA_TREE/share/ca-certs/nss-version")"
+
+why=""
+ca_os_allows_keychain || why="macOS 11 and later need a password to change admin trust"
+[ -n "$why" ] || ca_is_booted_root || why="$CA_ROOT/ is not the running system"
+if [ -n "$why" ]; then
+  if ca_receipt_changes; then echo "ca-certs: $why; keeping the record of earlier changes and changing nothing" >&2; exit 0; fi
+  ca_receipt_set nss "$nss"
+  ca_receipt_set keychain no "$why"
+  echo "ca-certs: $why; installed the certificate bundle only" >&2
+  exit 0
+fi
+
+# spec: docs/TRUST-POLICY.md #9 -- the backup is the one wholesale restore point, so it is written once
+#       and never over: an existing one was saved before any change and is kept even when the
+#       receipt no longer says so, a new one lands only whole and non-empty, and a failure says why
+backup_rec="$(ca_receipt_value backup)"
+backup="$CA_VAR/trust-settings-backup.plist"
+if [ -z "$backup_rec" ]; then
+  backup_state=none
+  if [ -s "$backup" ]; then
+    backup_state=yes
+  elif [ -f "$CA_ADMIN_FILE" ]; then
+    backup_dir="$(mktemp -d "$CA_VAR/backup.XXXXXX")"
+    if "$SECURITY" trust-settings-export -d "$backup_dir/backup.plist" >/dev/null 2>"$backup_dir/err"; then
+      [ -s "$backup_dir/backup.plist" ] || { rm -rf "$backup_dir"; ca_die "security exported an empty backup of the admin trust settings; changed nothing"; }
+      mv -f "$backup_dir/backup.plist" "$backup" || { rm -rf "$backup_dir"; ca_die "could not save the backup of the admin trust settings; changed nothing"; }
+      backup_state=yes
+    elif grep -q "$CA_NO_ADMIN_SETTINGS_MSG" "$backup_dir/err"; then
+      # spec: docs/TRUST-POLICY.md #9 -- nothing to save when there is nothing to restore
+      :
+    else
+      backup_why="$(cat "$backup_dir/err")" || backup_why="(its error output is unreadable)"
+      rm -rf "$backup_dir"
+      ca_die "could not back up the admin trust settings; changed nothing: $backup_why"
+    fi
+    rm -rf "$backup_dir"
+  fi
+  [ "$backup_state" = yes ] || rm -f "$backup"
+  ca_receipt_set backup "$backup_state"
+fi
+ca_receipt_set nss "$nss"
+ca_receipt_set keychain yes
+
+# spec: docs/TRUST-POLICY.md #9 -- reconcile the receipt against the trust store on every run, with
+#       plain assignments that die before anything changes if either listing itself fails, so a
+#       run that ended abruptly (an earlier listing failure, or a rejected add) can never leave a
+#       record that claims a change which never took hold, or omits one that genuinely did
+kc="$(ca_kc_keys)"
+admin="$(ca_admin_keys)"
+imported="$(ca_receipt_list imported)"
+for sha in $imported; do
+  ca_in "$sha" "$kc" || ca_receipt_drop imported "$sha"
+done
+
+for kind in trusted denied; do
+  dir=trusted; [ "$kind" = denied ] && dir=distrust
+  recorded="$(ca_receipt_list "$kind")"
+  for sha in $recorded; do
+    [ -f "$CA_TREE/share/ca-certs/$dir/$sha.pem" ] && continue
+    ca_undo_setting "$sha"
+    ca_receipt_drop "$kind" "$sha"
+    if ca_receipt_has imported "$sha"; then ca_undo_import "$sha"; ca_receipt_drop imported "$sha"; fi
+  done
+done
+
+admin="$(ca_admin_keys)"
+# spec: docs/TRUST-POLICY.md #8 and #9 -- a preexisting line holds only while a checked admin listing
+#       still shows that setting; once it is gone the root is not yet applied, and trusting it below
+#       records it as ours, so it is never skipped forever
+preexisting="$(ca_receipt_list preexisting)"
+for sha in $preexisting; do
+  ca_in "$sha" "$admin" || ca_receipt_drop preexisting "$sha"
+done
+added=0; kept=0
+for kind in trusted denied; do
+  dir=trusted; [ "$kind" = denied ] && dir=distrust
+  for f in "$CA_TREE/share/ca-certs/$dir"/*.pem; do
+    [ -f "$f" ] || continue
+    sha="$(basename "$f" .pem)"
+    if ca_receipt_has "$kind" "$sha"; then
+      # spec: docs/TRUST-POLICY.md #9 -- ours by record; skip ONLY if a successful admin listing
+      #       confirms it. If absent, re-apply it instead of skipping it forever: keep the
+      #       existing <kind> line and fall through to the add below.
+      ca_in "$sha" "$admin" && continue
+    else
+      ca_receipt_has preexisting "$sha" && { kept=$((kept + 1)); continue; }
+      if ca_in "$sha" "$admin"; then ca_receipt_add preexisting "$sha"; kept=$((kept + 1)); continue; fi
+      ca_receipt_add "$kind" "$sha"
+    fi
+    cp "$f" "$CA_VAR/certs/$sha.pem"
+    kc="$(ca_kc_keys)"
+    before="no"; ca_in "$sha" "$kc" && before="yes"
+    if [ "$before" = no ] && ! ca_receipt_has imported "$sha"; then ca_receipt_add imported "$sha"; fi
+    add_rc=0
+    if [ "$kind" = trusted ]; then
+      "$SECURITY" add-trusted-cert -d -r trustRoot -k "$CA_KC" "$f" || add_rc=$?
+    else
+      "$SECURITY" add-trusted-cert -d -r deny -p ssl -k "$CA_KC" "$f" || add_rc=$?
+    fi
+    if [ "$add_rc" -ne 0 ]; then
+      # spec: docs/TRUST-POLICY.md #9 -- a failed add may still have partly taken effect; check with
+      #       fresh, checked listings and drop only what a successful listing proves never
+      #       happened. If a listing itself fails, die leaving the lines for the next run to reconcile.
+      if ca_receipt_has imported "$sha"; then
+        kc="$(ca_kc_keys)"
+        ca_in "$sha" "$kc" || ca_receipt_drop imported "$sha"
+      fi
+      admin="$(ca_admin_keys)"
+      ca_in "$sha" "$admin" || ca_receipt_drop "$kind" "$sha"
+      if [ "$kind" = trusted ]; then ca_die "could not trust $sha"; else ca_die "could not distrust $sha"; fi
+    fi
+    if ca_receipt_has imported "$sha"; then
+      kc="$(ca_kc_keys)"
+      ca_in "$sha" "$kc" || ca_receipt_drop imported "$sha"
+    fi
+    admin="$(ca_admin_keys)"
+    if ca_in "$sha" "$admin"; then
+      added=$((added + 1))
+    else
+      ca_receipt_drop "$kind" "$sha"
+      ca_die "security reported success for $sha but it has no admin trust setting; stopping"
+    fi
+  done
+done
+ca_receipt_set applied "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "ca-certs: $added trust settings added, $kept existing settings left alone (NSS $nss)" >&2
