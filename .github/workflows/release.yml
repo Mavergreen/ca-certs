@@ -179,6 +179,112 @@ jobs:
           name: ca-certs-dist
           path: ${{ env.DIST }}/*
 
+  # spec: tests/acceptance-onbox.sh -- the pkg, installed the way a user installs it, on a real
+  #       10.9.5 guest (Mavergreen/mavericks-vm): every root's TLS verdict while installed, an
+  #       upgrade from the latest published release, a reinstall, and an uninstall that restores
+  #       the trust store exactly. A skip (77) fails here: this job exists so that it runs. publish
+  #       waits for it. A fork's pull request gets no secrets, so cannot boot the guest, and never
+  #       publishes: it skips this.
+  on-mavericks:
+    needs: [build]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ca-certs-dist
+          path: dist
+      - name: The latest published release, to upgrade from
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p previous
+          tag="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 \
+            --json tagName --jq '.[0].tagName // empty')"
+          if [ -n "$tag" ]; then
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'ca-certs-*.pkg' --dir previous
+          fi
+      - uses: Mavergreen/mavericks-vm@v1
+        with:
+          image-key: ${{ secrets.MAVERICKS_VM_KEY }}
+          copyback: false
+          debug-on-error: true
+          sync-time: true
+          run: |
+            pkg="$(ls dist/ca-certs-*.pkg)"
+            prev="$(ls previous/ca-certs-*.pkg 2>/dev/null || :)"
+            status=0
+            if [ -n "$prev" ]; then
+              CA_CERTS_ONBOX=1 sh tests/acceptance-onbox.sh "$pkg" "$prev" || status=$?
+            else
+              CA_CERTS_ONBOX=1 sh tests/acceptance-onbox.sh "$pkg" || status=$?
+            fi
+            [ "$status" -eq 0 ] || { echo "acceptance-onbox.sh exited $status (77 is a skip, a failure here)"; exit 1; }
+
+  # spec: tests/acceptance-onbox.sh, docs/TRUST-POLICY.md #10 -- the same acceptance on the newest
+  #       macOS, Apple Silicon and Intel, where the product installs the bundle and changes no
+  #       trust settings: the trust store unchanged throughout, the updater native to the
+  #       hardware, an upgrade from the latest published release, and an uninstall that leaves
+  #       nothing. The step checks the runner's hardware, since a label has landed on the wrong
+  #       one before. Drop the Intel leg when GitHub retires macos-26-intel.
+  on-macos:
+    needs: [build]
+    name: on-macos (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            arm64: '1'
+          - runner: macos-26-intel
+            arm64: '0'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ca-certs-dist
+          path: dist
+      - name: The latest published release, to upgrade from
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p previous
+          tag="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1 \
+            --json tagName --jq '.[0].tagName // empty')"
+          if [ -n "$tag" ]; then
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'ca-certs-*.pkg' --dir previous
+          fi
+      - name: Acceptance on this runner's macOS
+        env:
+          WANT_ARM64: ${{ matrix.arm64 }}
+        run: |
+          set -eu
+          got="$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)"
+          [ "$got" = "$WANT_ARM64" ] || { echo "::error::hw.optional.arm64 is $got, want $WANT_ARM64: this runner is not the hardware its leg tests"; exit 1; }
+          pkg="$(ls dist/ca-certs-*.pkg)"
+          prev="$(ls previous/ca-certs-*.pkg 2>/dev/null || :)"
+          status=0
+          if [ -n "$prev" ]; then
+            CA_CERTS_ONBOX=1 sh tests/acceptance-onbox.sh "$pkg" "$prev" || status=$?
+          else
+            CA_CERTS_ONBOX=1 sh tests/acceptance-onbox.sh "$pkg" || status=$?
+          fi
+          [ "$status" -eq 0 ] || { echo "acceptance-onbox.sh exited $status (77 is a skip, a failure here)"; exit 1; }
+
   scan:
     needs: [build]
     if: always() && (needs.build.outputs.publish == 'true')
@@ -192,7 +298,7 @@ jobs:
       SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
 
   publish:
-    needs: [build, scan]
+    needs: [build, scan, on-mavericks, on-macos]
     if: needs.build.outputs.publish == 'true'
     permissions:
       contents: write

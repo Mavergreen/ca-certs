@@ -63,6 +63,123 @@ printf '%s\n' "$GUARD_IF" | grep -q 'RECONCILE' \
 printf '%s\n' "$GUARD_IF" | grep -q 'rel' \
   || fail "the if guarding release-needed.sh must also test rel=yes -- no point asking release-needed.sh about a run that already won't publish: $GUARD_IF"
 
+job() { awk -v j="  $1:" '$0 == j { f = 1; print; next } f && /^  [A-Za-z]/ { exit } f { print }' "$W"; }
+step_run() {  # print the run: | body of the step in job $1 whose header line matches $2
+  job "$1" | awk -v s="$2" '
+    index($0, s) { f = 1; next }
+    f && /^      - / { exit }
+    f && /^ *run: \|/ { r = 1; match($0, /^ */); ind = RLENGTH + 2; next }
+    r { if (substr($0, 1, ind) ~ /^ +$/ && length($0) > ind) print substr($0, ind + 1)
+        else if ($0 !~ /^[[:space:]]*$/) exit
+        else print "" }'
+}
+
+scenario "an on-mavericks job runs acceptance-onbox.sh on a 10.9 guest, and publish waits for it"
+ONM="$(job on-mavericks)"
+[ -n "$ONM" ] || fail "release.yml needs an on-mavericks job: tests/acceptance-onbox.sh on Mavergreen/mavericks-vm, the only place the applier meets a real 10.9 trust store before a release ships"
+printf '%s\n' "$ONM" | grep -qE '^    needs: \[build\]$' || fail "on-mavericks must need [build], whose ca-certs-dist artifact it installs"
+printf '%s\n' "$ONM" | grep -q 'uses: Mavergreen/mavericks-vm@v1' || fail "on-mavericks must boot its guest with Mavergreen/mavericks-vm@v1"
+printf '%s\n' "$ONM" | grep -qE '^ +sync-time: true$' \
+  || fail "on-mavericks must pass sync-time: true -- verify-cert judges validity dates by the guest's clock, and a cached guest's clock is stale"
+job publish | grep -E '^    needs:' | grep -q 'on-mavericks' || fail "publish must need on-mavericks, so no release ships that failed on the guest"
+
+scenario "an on-macos job runs acceptance-onbox.sh on Apple Silicon and on Intel, and publish waits for it"
+ONM2="$(job on-macos)"
+[ -n "$ONM2" ] || fail "release.yml needs an on-macos job: tests/acceptance-onbox.sh on the newest macOS runners, where the product promises to change no trust settings"
+printf '%s\n' "$ONM2" | grep -qE '^    needs: \[build\]$' || fail "on-macos must need [build], whose ca-certs-dist artifact it installs"
+printf '%s\n' "$ONM2" | grep -qE '^ +fail-fast: false$' || fail "on-macos must set fail-fast: false, so one runner's failure does not hide the other's result"
+printf '%s\n' "$ONM2" | grep -qE '^ +runs-on: \$\{\{ matrix.runner \}\}$' || fail "on-macos must run on its matrix's runner"
+printf '%s\n' "$ONM2" | awk '/- runner: macos-26$/ { getline; print }' | grep -qE "arm64: '1'$" \
+  || fail "on-macos's matrix must include runner: macos-26 with arm64: '1' (Apple Silicon)"
+printf '%s\n' "$ONM2" | awk '/- runner: macos-26-intel$/ { getline; print }' | grep -qE "arm64: '0'$" \
+  || fail "on-macos's matrix must include runner: macos-26-intel with arm64: '0' (Intel)"
+job publish | grep -E '^    needs:' | grep -q 'on-macos' || fail "publish must need on-macos, so no release ships that failed on a modern Mac"
+
+ONB="$(mktemp -d "${TMPDIR:-/tmp}/release-onmavericks.XXXXXX")"
+trap 'rm -rf "$ONB"' EXIT
+step_run on-mavericks 'uses: Mavergreen/mavericks-vm@v1' > "$ONB/guest.sh"
+[ -s "$ONB/guest.sh" ] || fail "could not extract the mavericks-vm step's run: text from on-mavericks"
+step_run on-macos "name: Acceptance on this runner's macOS" > "$ONB/macos.sh"
+[ -s "$ONB/macos.sh" ] || fail "on-macos needs a step named \"Acceptance on this runner's macOS\""
+for j in on-mavericks on-macos; do
+  step_run "$j" 'name: The latest published release, to upgrade from' > "$ONB/previous-$j.sh"
+  [ -s "$ONB/previous-$j.sh" ] || fail "$j needs a step named 'The latest published release, to upgrade from' that fetches the pkg it upgrades from"
+done
+
+mkdir -p "$ONB/bin"
+cat > "$ONB/bin/sysctl" <<'FAKESYSCTL'
+#!/bin/sh
+[ "$*" = "-n hw.optional.arm64" ] || { echo "fake-sysctl: unsupported: $*" >&2; exit 1; }
+[ -n "${FAKE_ARM64:-}" ] || { echo "sysctl: unknown oid 'hw.optional.arm64'" >&2; exit 1; }
+echo "$FAKE_ARM64"
+FAKESYSCTL
+chmod +x "$ONB/bin/sysctl"
+acceptance() {  # $1=step script; $2=stub exit status; $3=1 to stage a previous pkg; $4=hw.optional.arm64 ('' = no such oid); $5=WANT_ARM64
+  rm -rf "$ONB/g"; mkdir -p "$ONB/g/dist" "$ONB/g/tests" "$ONB/g/previous"
+  : > "$ONB/g/dist/ca-certs-9.9.9-mavericks.2.pkg"; : > "$ONB/g/dist/roots.txt"; : > "$ONB/g/dist/ca-certs.xml"
+  [ "$3" != 1 ] || : > "$ONB/g/previous/ca-certs-9.9.9-mavericks.1.pkg"
+  printf '#!/bin/sh\nprintf "%%s|%%s\\n" "${CA_CERTS_ONBOX:-}" "$*" > "%s/g/args"\nexit %s\n' "$ONB" "$2" > "$ONB/g/tests/acceptance-onbox.sh"
+  ( cd "$ONB/g" && PATH="$ONB/bin:$PATH" FAKE_ARM64="$4" WANT_ARM64="$5" sh -e "$1" ) > "$ONB/g/log" 2>&1
+}
+for step in guest macos; do
+  scenario "the $step step passes the pkg, and the previous release's pkg when there is one, to acceptance-onbox.sh"
+  rc=0; acceptance "$ONB/$step.sh" 0 0 1 1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "$step: with acceptance-onbox.sh passing and no previous release, the step must pass, exited $rc: $(cat "$ONB/g/log")"
+  [ "$(cat "$ONB/g/args")" = "1|dist/ca-certs-9.9.9-mavericks.2.pkg" ] \
+    || fail "$step: with no previous release, want CA_CERTS_ONBOX=1 and the one pkg, got: $(cat "$ONB/g/args")"
+  rc=0; acceptance "$ONB/$step.sh" 0 1 1 1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "$step: with a previous release staged, the step must pass, exited $rc: $(cat "$ONB/g/log")"
+  [ "$(cat "$ONB/g/args")" = "1|dist/ca-certs-9.9.9-mavericks.2.pkg previous/ca-certs-9.9.9-mavericks.1.pkg" ] \
+    || fail "$step: with a previous release staged, want the pkg and then the previous pkg, got: $(cat "$ONB/g/args")"
+  rc=0; acceptance "$ONB/$step.sh" 77 0 1 1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "$step: acceptance-onbox.sh exiting 77 (a skip) must fail the step: this job exists so that it runs"
+  rc=0; acceptance "$ONB/$step.sh" 1 1 1 1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "$step: acceptance-onbox.sh failing must fail the step"
+done
+
+scenario "the macos step refuses a runner whose hardware is not what its matrix leg says"
+rc=0; acceptance "$ONB/macos.sh" 0 0 '' 0 || rc=$?
+[ "$rc" -eq 0 ] || fail "on Intel (no hw.optional.arm64) with WANT_ARM64=0, the step must pass, exited $rc: $(cat "$ONB/g/log")"
+rc=0; acceptance "$ONB/macos.sh" 0 0 1 0 || rc=$?
+[ "$rc" -ne 0 ] || fail "an Apple Silicon runner on the Intel leg must fail the step -- the label did not give the hardware the leg tests"
+rc=0; acceptance "$ONB/macos.sh" 0 0 '' 1 || rc=$?
+[ "$rc" -ne 0 ] || fail "an Intel runner on the Apple Silicon leg must fail the step -- a macos-26 label has landed on x86_64 before"
+rc=0; acceptance "$ONB/macos.sh" 0 0 0 1 || rc=$?
+[ "$rc" -ne 0 ] || fail "hw.optional.arm64=0 on the Apple Silicon leg must fail the step"
+
+cat > "$ONB/bin/gh" <<'FAKEGH'
+#!/bin/sh
+set -eu
+echo "$*" >> "$GH_LOG"
+[ "${GH_FAKE_FAIL:-0}" != 1 ] || { echo "fake-gh: simulated API failure" >&2; exit 1; }
+case "$1 $2" in
+  "release list") printf '%s' "$GH_FAKE_LATEST"; [ -z "$GH_FAKE_LATEST" ] || echo ;;
+  "release download") d=""; while [ $# -gt 0 ]; do case "$1" in --dir|-D) d="$2"; shift ;; esac; shift; done
+                      : > "${d:?}/ca-certs-$GH_FAKE_LATEST.pkg" ;;
+  *) echo "fake-gh: unsupported: $*" >&2; exit 1 ;;
+esac
+FAKEGH
+chmod +x "$ONB/bin/gh"
+previous() {  # $1=step script; $2=latest tag or empty; $3=1 to fail every gh call
+  rm -rf "$ONB/p"; mkdir -p "$ONB/p"; : > "$ONB/p/gh.log"
+  ( cd "$ONB/p" && PATH="$ONB/bin:$PATH" GH_LOG="$ONB/p/gh.log" GH_FAKE_LATEST="$2" GH_FAKE_FAIL="$3" \
+      GH_TOKEN=dummy GITHUB_REPOSITORY=Mavergreen/ca-certs bash -e "$1" ) > "$ONB/p/log" 2>&1
+}
+for j in on-mavericks on-macos; do
+  scenario "$j's previous-release step downloads the latest release's pkg, fetches nothing when there is none, and fails when gh does"
+  rc=0; previous "$ONB/previous-$j.sh" 3.130.0-mavericks.1 0 || rc=$?
+  [ "$rc" -eq 0 ] || fail "$j: with a published release, the step must pass, exited $rc: $(cat "$ONB/p/log")"
+  [ -f "$ONB/p/previous/ca-certs-3.130.0-mavericks.1.pkg" ] || fail "$j: with a published release, its pkg must land in previous/: $(cat "$ONB/p/gh.log")"
+  grep -q 'release list.*--exclude-drafts' "$ONB/p/gh.log" || fail "$j: the latest release must exclude drafts -- a draft is no release anyone installed: $(cat "$ONB/p/gh.log")"
+  rc=0; previous "$ONB/previous-$j.sh" "" 0 || rc=$?
+  [ "$rc" -eq 0 ] || fail "$j: with no release yet, the step must pass, exited $rc: $(cat "$ONB/p/log")"
+  [ -d "$ONB/p/previous" ] && [ -z "$(ls "$ONB/p/previous")" ] || fail "$j: with no release yet, previous/ must exist and be empty"
+  grep -q 'release download' "$ONB/p/gh.log" && fail "$j: with no release yet, nothing may be downloaded: $(cat "$ONB/p/gh.log")"
+  rc=0; previous "$ONB/previous-$j.sh" 3.130.0-mavericks.1 1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "$j: a failing gh must fail the step -- an unanswered lookup must not read as 'no previous release' and skip the upgrade leg"
+done
+rm -rf "$ONB"; trap - EXIT
+
 scenario "the ver step, actually run: reconcile gates on release-needed.sh, local_release stays ungated, a failing lookup fails the step"
 # spec: .github/workflows/release.yml -- the scenario above only greps the guarding `if` line's
 #       text, so a mutation that leaves that text alone but breaks its EFFECT (a `case` arm that
