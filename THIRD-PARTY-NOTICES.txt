@@ -1,0 +1,6 @@
+CA Certificates for Mavericks installs certificate data derived from Mozilla's NSS
+(lib/ckfw/builtins/certdata.txt), which is distributed under the Mozilla Public License 2.0:
+https://www.mozilla.org/MPL/2.0/
+
+The exact source for each release is the NSS release named in NSS_TAG, fetched from
+https://ftp.mozilla.org/pub/security/nss/releases/ and verified against Mozilla's SHA256SUMS.
