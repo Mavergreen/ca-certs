@@ -27,6 +27,7 @@ Measured on 2026-09-25, on a real Mac OS X 10.9.5 machine, against NSS 3.130.
 10. On macOS 11 and later, only the bundle file is installed.
 11. Updates are automatic, and every release says what changed.
 12. Roots AquaTransport's root component also sets are left to it, whichever was installed first.
+13. The bundle never holds a root this Mac's admin trust settings deny for secure websites.
 
 ---
 
@@ -292,3 +293,32 @@ ours, and its 7 distrusted roots are all in `withdrawn.md`.
 
 **Reconsider when:** AquaTransport records its own claims somewhere we can read, or stops shipping
 its root component.
+
+## 13. The bundle never holds a root this Mac's admin trust settings deny for secure websites
+
+**Decision:** on the running system, on every macOS, the bundle at the contract path is rebuilt from
+the shipped copy on each install and update. Any root that the admin trust settings deny for secure
+websites (TLS) is left out. The receipt lists each one as `bundle-omitted`. A disk that wasn't
+booted keeps the bundle as shipped.
+
+**Why:** the keychain's verdict is the one Safari, Mail, the system `curl` and Mavergreen's Go
+toolchains all reach. Programs that read only a PEM file can't see your denials, your IT
+department's, or AquaTransport's. Without this, they would trust a root the rest of the Mac refuses.
+
+**What counts as a deny:** the same rule Apple's evaluation and Go's use. Settings apply in order and
+the first one that decides TLS wins. One restricted to another use (such as email), or to a single
+hostname, doesn't count.
+
+**Instead of:**
+
+| Alternative | Why not |
+|---|---|
+| Ship one bundle and leave it alone | OpenSSL-based programs would keep trusting a root you denied. |
+| Copy the keychain's whole verdict into the bundle | It would add the roots Apple ships that Mozilla doesn't trust (#5), which is what this product exists to avoid. |
+
+**What this doesn't cover:**
+
+- **User-level settings.** Those are per user, and the bundle is shared.
+- **A deny made after the last install or update.** It reaches the bundle at the next one.
+
+**Reconsider when:** a Mavergreen product needs the bundle to also leave out roots a user has denied.

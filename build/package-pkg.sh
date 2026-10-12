@@ -31,6 +31,7 @@ cp "$D"/trusted/*.pem "$P/share/ca-certs/trusted/"
 cp "$D"/distrust/*.pem "$P/share/ca-certs/distrust/"
 cp "$D/ca-certificates.crt" "$P/etc/openssl/certs/ca-certificates.crt"
 cp "$D/aquatransport-roots.txt" "$P/share/ca-certs/"
+cp "$D/ca-certificates.crt" "$D/ca-certificates.sha1" "$P/share/ca-certs/"
 cp "$MAVERICKS_ROOT/THIRD-PARTY-NOTICES.txt" "$P/share/ca-certs/"
 sh "$MAVERICKS_ROOT/build/derive-upstream-version.sh" > "$P/share/ca-certs/nss-version"
 sh "$SHIPYARD/stage_product.sh" --stage "$ST" --product ca-certs \

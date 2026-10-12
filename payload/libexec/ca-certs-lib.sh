@@ -29,6 +29,10 @@ ca_os_allows_keychain() {
 CA_NO_ADMIN_SETTINGS_MSG='No Trust Settings were found'
 
 ca_admin_keys() {
+  _x="$(ca_admin_xml)"
+  printf '%s\n' "$_x" | sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p'
+}
+ca_admin_xml() {
   [ -f "$CA_ADMIN_FILE" ] || return 0
   _t="$(mktemp "${TMPDIR:-/tmp}/ca-certs-admin.XXXXXX")"
   _e="$(mktemp "${TMPDIR:-/tmp}/ca-certs-admin-err.XXXXXX")"
@@ -41,7 +45,7 @@ ca_admin_keys() {
   rm -f "$_e"
   _x="$(plutil -convert xml1 -o - "$_t")" || { rm -f "$_t"; ca_die "could not read the exported admin trust settings"; }
   rm -f "$_t"
-  printf '%s\n' "$_x" | sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p'
+  printf '%s\n' "$_x"
 }
 
 ca_kc_keys() {
@@ -141,4 +145,74 @@ ca_cede_to_aquatransport() {
       if ca_receipt_has "$_atk" "$_at"; then ca_receipt_drop "$_atk" "$_at"; fi
     done
   done
+}
+
+# spec: docs/TRUST-POLICY.md #13 -- reads trust-settings-export's XML (plutil xml1) on stdin and
+#       prints each certificate whose admin settings deny it for TLS. Settings apply in order and the
+#       first that decides TLS wins: one restricted to another policy or to a policy string (a
+#       hostname) doesn't apply, an absent result is TrustRoot, and Unspecified (4) decides nothing.
+#       No trustSettings at all means TrustRoot for every use.
+ca_ssl_denied_in_xml() {
+  awk '
+    function decide() {
+      if (done || pstr) return
+      if (pol != "" && pol != "KoZIhvdjZAED") return
+      r = (res == "") ? 1 : res
+      if (r == 4) return
+      done = 1
+      if (r == 3) print sha
+    }
+    /<key>[0-9A-F]*<\/key>/ && !insets {
+      k = $0; sub(/.*<key>/, "", k); sub(/<\/key>.*/, "", k)
+      if (length(k) == 40) { sha = k; done = 0 }
+      next
+    }
+    /<key>trustSettings<\/key>/ { insets = 1; next }
+    insets && /<\/array>/ { insets = 0; next }
+    insets && /<dict>/ { pol = ""; pstr = 0; res = ""; want = ""; next }
+    insets && /<\/dict>/ { decide(); next }
+    insets && /<key>kSecTrustSettingsPolicy<\/key>/ { want = "pol"; next }
+    insets && /<key>kSecTrustSettingsPolicyString<\/key>/ { pstr = 1; want = ""; next }
+    insets && /<key>kSecTrustSettingsResult<\/key>/ { want = "res"; next }
+    insets && /<key>/ { want = ""; next }
+    insets && want == "pol" && !/<\/?data>/ { v = $0; gsub(/[ \t]/, "", v); pol = pol v; next }
+    insets && want == "pol" && /<\/data>/ { want = ""; next }
+    insets && want == "res" && /<integer>/ { v = $0; gsub(/[^0-9]/, "", v); res = v; want = ""; next }
+  '
+}
+
+CA_BUNDLE="$CA_TREE/etc/openssl/certs/ca-certificates.crt"
+CA_BUNDLE_SHIPPED="$CA_TREE/share/ca-certs/ca-certificates.crt"
+CA_BUNDLE_INDEX="$CA_TREE/share/ca-certs/ca-certificates.sha1"
+# spec: docs/TRUST-POLICY.md #13 -- the bundle is rebuilt from the shipped copy on every run,
+#       leaving out each root the running system's admin trust settings deny for TLS, and the
+#       receipt lists what was left out. Replaced only whole, by rename, never partly written.
+ca_filter_bundle() {
+  [ -f "$CA_BUNDLE_SHIPPED" ] && [ -f "$CA_BUNDLE_INDEX" ] || return 0
+  _xml="$(ca_admin_xml)"
+  _den="$(printf '%s\n' "$_xml" | ca_ssl_denied_in_xml)" || ca_die "could not read which roots the admin trust settings deny"
+  _fd="$(mktemp "${TMPDIR:-/tmp}/ca-certs-denied.XXXXXX")"
+  printf '%s\n' "$_den" > "$_fd" || { rm -f "$_fd"; ca_die "could not write the list of denied roots"; }
+  _fb="$CA_BUNDLE.tmp"
+  rm -f "$_fb"
+  _out="$(awk -v idx="$CA_BUNDLE_INDEX" -v den="$_fd" -v out="$_fb" '
+    BEGIN {
+      while ((getline l < idx) > 0) sha[++n] = l
+      while ((getline l < den) > 0) if (l != "") deny[l] = 1
+    }
+    { buf = buf $0 "\n" }
+    /-----END CERTIFICATE-----/ {
+      i++
+      if (i > n) { bad = 1; exit }
+      if (sha[i] in deny) print sha[i]; else printf "%s", buf > out
+      buf = ""
+    }
+    END { if (bad || i != n || buf != "") exit 1; close(out) }
+  ' "$CA_BUNDLE_SHIPPED")" || { rm -f "$_fd" "$_fb"; ca_die "the shipped bundle and its index disagree; left the bundle as it was"; }
+  rm -f "$_fd"
+  [ -s "$_fb" ] || { rm -f "$_fb"; ca_die "every root in the bundle is denied; left the bundle as it was"; }
+  chmod 644 "$_fb" && mv -f "$_fb" "$CA_BUNDLE" || { rm -f "$_fb"; ca_die "could not replace $CA_BUNDLE"; }
+  _was="$(ca_receipt_list bundle-omitted)"
+  for _bo in $_was; do ca_in "$_bo" "$_out" || ca_receipt_drop bundle-omitted "$_bo"; done
+  for _bo in $_out; do ca_receipt_has bundle-omitted "$_bo" || ca_receipt_add bundle-omitted "$_bo"; done
 }

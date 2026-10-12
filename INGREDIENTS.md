@@ -60,13 +60,15 @@ those pages with its own spelling (`nss_3_130.html`, `nss_3_126_1.html`), so the
 
 - **The bundle path is a contract:** `/usr/local/mavergreen/ca-certs/etc/openssl/certs/ca-certificates.crt`.
   It is registered with ca-certs' short name in shipyard's `scripts/product-names`, and won't move.
-  It holds every root Mozilla trusts for websites (`docs/TRUST-POLICY.md` #2, #3), on every macOS.
+  It holds every root Mozilla trusts for websites (`docs/TRUST-POLICY.md` #2, #3), on every macOS,
+  less any root the running Mac's admin trust settings deny for TLS (#13).
 - **Installed?** `/usr/local/mavergreen/ca-certs/mavergreen.plist` exists. Its `version` key is the
   release (`3.130.0-mavericks.1`).
 - **Which Mozilla data?** `/usr/local/mavergreen/var/ca-certs/receipt` has a line `nss <version>`
   (`nss 3.130.0`).
 - **Were trust settings changed?** The same receipt has `keychain yes`, or `keychain no <reason>` on
   macOS 11 and later, or when installed onto a disk that wasn't booted.
+- **Which roots were left out of the bundle?** One `bundle-omitted <SHA-1>` line each.
 
 ## Uninstall
 

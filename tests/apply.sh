@@ -411,4 +411,79 @@ printf '# fixture\ntrust %s a\n' "$A" > "$TREE/share/ca-certs/aquatransport-root
 apply 2>/dev/null || fail "apply failed"
 has "trusted $A"; has "imported $A"; lacks "preexisting $A"
 
+mkbundle() {  # the bundle the pkg ships: share/ca-certs/ca-certificates.crt, its .sha1 index, and the contract copy
+  _b="$TREE/share/ca-certs/ca-certificates.crt"; : > "$_b"; : > "$TREE/share/ca-certs/ca-certificates.sha1"
+  for _f in "$TREE"/share/ca-certs/trusted/*.pem; do
+    _h="$(basename "$_f" .pem)"; printf '# %s\n' "$_h" >> "$_b"; cat "$_f" >> "$_b"
+    printf '%s\n' "$_h" >> "$TREE/share/ca-certs/ca-certificates.sha1"
+  done
+  mkdir -p "$TREE/etc/openssl/certs"; cp "$_b" "$TREE/etc/openssl/certs/ca-certificates.crt"; cp "$_b" "$T/pristine$n"
+}
+bundle_has() { grep -qx "# $1" "$TREE/etc/openssl/certs/ca-certificates.crt"; }
+bundle_ok() {  # every label in the contract bundle is followed by exactly one certificate
+  [ "$(grep -c '^# ' "$TREE/etc/openssl/certs/ca-certificates.crt")" = "$(grep -c 'BEGIN CERTIFICATE' "$TREE/etc/openssl/certs/ca-certificates.crt")" ] \
+    || fail "the rewritten bundle lost its shape: $(cat "$TREE/etc/openssl/certs/ca-certificates.crt")"
+}
+
+scenario "a root the admin trust settings deny for TLS is left out of the bundle, and the receipt says so"
+fresh
+A="$(mkcert a "$TREE/share/ca-certs/trusted")"; B="$(mkcert b "$TREE/share/ca-certs/trusted")"; C="$(mkcert c "$TREE/share/ca-certs/trusted")"
+mkbundle
+"$SECURITY" add-trusted-cert -d -r deny -k kc "$TREE/share/ca-certs/trusted/$B.pem"
+"$SECURITY" add-trusted-cert -d -r deny -p ssl -k kc "$TREE/share/ca-certs/trusted/$C.pem"
+apply 2>/dev/null || fail "apply failed"
+bundle_has "$A" || fail "A has no deny: it must stay in the bundle"
+if bundle_has "$B"; then fail "B is denied for every use: OpenSSL programs must not trust it either"; fi
+if bundle_has "$C"; then fail "C is denied for TLS: OpenSSL programs must not trust it either"; fi
+bundle_ok
+has "bundle-omitted $B"; has "bundle-omitted $C"; lacks "bundle-omitted $A"
+cmp -s "$TREE/share/ca-certs/ca-certificates.crt" "$T/pristine$n" || fail "the shipped copy in share/ must stay as shipped, so the next run starts from it"
+
+scenario "when the deny goes away, the next run puts the root back"
+"$SECURITY" remove-trusted-cert -d "$TREE/share/ca-certs/trusted/$B.pem"
+apply 2>/dev/null || fail "apply failed"
+bundle_has "$B" || fail "B's deny is gone: B must be back in the bundle"
+lacks "bundle-omitted $B"; has "bundle-omitted $C"
+bundle_ok
+
+scenario "a deny for email only, or for one hostname, leaves the root in the bundle"
+fresh
+A="$(mkcert a "$TREE/share/ca-certs/trusted")"; B="$(mkcert b "$TREE/share/ca-certs/trusted")"
+mkbundle
+"$SECURITY" add-trusted-cert -d -r deny -p smime -k kc "$TREE/share/ca-certs/trusted/$A.pem"
+"$SECURITY" add-trusted-cert -d -r deny -p ssl -s www.example.com -k kc "$TREE/share/ca-certs/trusted/$B.pem"
+apply 2>/dev/null || fail "apply failed"
+cmp -s "$TREE/etc/openssl/certs/ca-certificates.crt" "$T/pristine$n" || fail "neither deny is a TLS deny for the root: the bundle must stay as shipped"
+if grep -q '^bundle-omitted ' "$VAR/receipt"; then fail "nothing was left out: $(cat "$VAR/receipt")"; fi
+
+scenario "macOS 11 and later: no trust setting changes, but the bundle still leaves out what the admin settings deny"
+fresh
+export CA_CERTS_OS_VERSION=11.7.10
+A="$(mkcert a "$TREE/share/ca-certs/trusted")"; B="$(mkcert b "$TREE/share/ca-certs/trusted")"
+mkbundle
+"$SECURITY" add-trusted-cert -d -r deny -k kc "$TREE/share/ca-certs/trusted/$B.pem"
+: > "$SEC/log"
+apply 2>/dev/null || fail "apply failed"
+if grep -q -E '^(add-trusted-cert|remove-trusted-cert|delete-certificate)' "$SEC/log"; then fail "macOS 11 and later: no trust setting may change: $(cat "$SEC/log")"; fi
+grep -q '^keychain no ' "$VAR/receipt" || fail "the receipt must say the keychain was left alone"
+if bundle_has "$B"; then fail "B is denied: OpenSSL programs on this Mac must not trust it either"; fi
+has "bundle-omitted $B"; bundle_ok
+
+scenario "a disk that wasn't booted: its trust settings can't be read, so the bundle stays as shipped"
+fresh
+A="$(mkcert a "$TREE/share/ca-certs/trusted")"; B="$(mkcert b "$TREE/share/ca-certs/trusted")"
+mkbundle
+"$SECURITY" add-trusted-cert -d -r deny -k kc "$TREE/share/ca-certs/trusted/$B.pem"
+apply CA_CERTS_BOOTED_ROOT="$T" 2>/dev/null || fail "apply failed"
+cmp -s "$TREE/etc/openssl/certs/ca-certificates.crt" "$T/pristine$n" || fail "the running system's settings say nothing about another disk: leave its bundle as shipped"
+if grep -q '^bundle-omitted ' "$VAR/receipt"; then fail "nothing was left out: $(cat "$VAR/receipt")"; fi
+
+scenario "no admin trust settings at all: the bundle stays as shipped"
+fresh
+A="$(mkcert a "$TREE/share/ca-certs/trusted")"
+mkbundle
+rm -f "$SEC/admin"
+apply CA_CERTS_OS_VERSION=11.0 2>/dev/null || fail "apply failed"
+cmp -s "$TREE/etc/openssl/certs/ca-certificates.crt" "$T/pristine$n" || fail "with nothing denied, the bundle must stay as shipped"
+
 echo "apply: ok"

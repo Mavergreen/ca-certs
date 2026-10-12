@@ -3,6 +3,8 @@
 # spec: docs/TRUST-POLICY.md #2 and #5 -- the generated data is what the product installs; check it before it ships
 set -eu
 R="$(cd "$(dirname "$0")/.." && pwd)"
+T="$(mktemp -d "${TMPDIR:-/tmp}/cabundle.XXXXXX")"
+trap 'rm -rf "$T"' EXIT
 . "$R/tests/lib/assert.sh"
 : "${MAVERICKS_BUILD_ROOT:=${TMPDIR:-/tmp}/mm-build}"
 D="$MAVERICKS_BUILD_ROOT/$(basename "$R")/data"
@@ -21,4 +23,13 @@ done
 [ "$(grep -c '^trusted ' "$D/roots.txt")" = "$n" ] || fail "roots.txt does not list every trusted root"
 [ "$(grep -c '^distrusted ' "$D/roots.txt")" = "$(ls "$D/distrust" | grep -c '\.pem$')" ] || fail "roots.txt does not list every distrusted root"
 cmp -s "$D/aquatransport-roots.txt" "$R/aquatransport-roots.txt" || fail "the build must carry aquatransport-roots.txt as committed"
+[ -f "$D/ca-certificates.sha1" ] || fail "no ca-certificates.sha1: the applier needs it to leave denied roots out of the bundle"
+[ "$(wc -l < "$D/ca-certificates.sha1" | tr -d ' ')" = "$n" ] || fail "ca-certificates.sha1 must list one SHA-1 per certificate in the bundle"
+awk '/-----BEGIN CERTIFICATE-----/ { f = sprintf("%s/blk%04d.pem", d, ++i) } f { print > f } /-----END CERTIFICATE-----/ { close(f); f = "" }' d="$T" "$D/ca-certificates.crt"
+i=0
+while read -r h; do
+  i=$((i + 1))
+  got="$(openssl x509 -noout -fingerprint -sha1 -in "$(printf '%s/blk%04d.pem' "$T" "$i")" | sed 's/.*=//' | tr -d :)"
+  [ "$got" = "$h" ] || fail "ca-certificates.sha1 line $i says $h, but the bundle's certificate $i is $got"
+done < "$D/ca-certificates.sha1"
 echo "bundle-sanity: ok ($n trusted)"

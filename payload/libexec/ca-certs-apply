@@ -5,7 +5,8 @@
 #          share/ca-certs/trusted, distrusts every root in share/ca-certs/distrust for TLS, undoes
 #          what an earlier release did that this one no longer asks for, and records each change in
 #          var/ca-certs/receipt as it happens. Only on the running system of a Mac OS X 10.x install;
-#          elsewhere it records that it changed nothing.
+#          elsewhere it records that it changed nothing. On the running system of any macOS, it then
+#          rebuilds the bundle without the roots the admin trust settings deny for TLS.
 # spec: tests/apply.sh
 set -eu
 [ "${1:-}" = --root ] && [ -n "${2:-}" ] || { echo "usage: ca-certs-apply --root VOLUME" >&2; exit 2; }
@@ -16,8 +17,10 @@ nss="$(cat "$CA_TREE/share/ca-certs/nss-version")"
 
 why=""
 ca_os_allows_keychain || why="macOS 11 and later need a password to change admin trust"
-[ -n "$why" ] || ca_is_booted_root || why="$CA_ROOT/ is not the running system"
+booted=yes; ca_is_booted_root || booted=no
+[ -n "$why" ] || [ "$booted" = yes ] || why="$CA_ROOT/ is not the running system"
 if [ -n "$why" ]; then
+  [ "$booted" = no ] || ca_filter_bundle
   if ca_receipt_changes; then echo "ca-certs: $why; keeping the record of earlier changes and changing nothing" >&2; exit 0; fi
   ca_receipt_set nss "$nss"
   ca_receipt_set keychain no "$why"
@@ -138,5 +141,6 @@ for kind in trusted denied; do
     fi
   done
 done
+ca_filter_bundle
 ca_receipt_set applied "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "ca-certs: $added trust settings added, $kept existing settings left alone (NSS $nss)" >&2

@@ -1,7 +1,10 @@
 #!/bin/sh
 # platform: host-agnostic
 #   usage: security SUBCOMMAND ...     (a stand-in for /usr/bin/security in tests)
-#          State in $FAKE_SEC_STATE: `admin` holds "SHA1 RESULT [POLICY]" per admin trust setting;
+#          State in $FAKE_SEC_STATE: `admin` holds "SHA1 RESULT [POLICY [POLICY_STRING]]" per admin
+#          trust setting, exported in the shape real 10.9 writes: no trustSettings for an unrestricted
+#          trustRoot, otherwise one setting with kSecTrustSettingsPolicy (ssl, smime or basic),
+#          kSecTrustSettingsPolicyString (-s) and kSecTrustSettingsResult;
 #          `keychain` holds one SHA1 per certificate in System.keychain; `log` gets every call.
 #          $FAKE_SEC_ROOT/Library/Security/Trust Settings/Admin.plist exists exactly when `admin`
 #          is non-empty, as on a real system -- unless FAKE_SEC_KEEP_EMPTY_ADMIN_FILE=1, which
@@ -52,7 +55,21 @@ case "$cmd" in
     {
       printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
       printf '<plist version="1.0">\n<dict>\n<key>trustList</key>\n<dict>\n'
-      while read -r sha rest; do printf '<key>%s</key>\n<dict>\n<key>fake</key>\n<string>%s</string>\n</dict>\n' "$sha" "$rest"; done < "$S/admin"
+      while read -r sha res pol str; do
+        printf '<key>%s</key>\n<dict>\n<key>issuerName</key>\n<data>\nZmFrZQ==\n</data>\n' "$sha"
+        if [ "$res" != restored ] && { [ "$res" != trustRoot ] || [ -n "$pol$str" ]; }; then
+          printf '<key>trustSettings</key>\n<array>\n<dict>\n'
+          case "$pol" in
+            ssl) printf '<key>kSecTrustSettingsPolicy</key>\n<data>\nKoZIhvdjZAED\n</data>\n' ;;
+            smime) printf '<key>kSecTrustSettingsPolicy</key>\n<data>\nKoZIhvdjZAEI\n</data>\n' ;;
+            basic) printf '<key>kSecTrustSettingsPolicy</key>\n<data>\nKoZIhvdjZAEC\n</data>\n' ;;
+          esac
+          [ -z "$str" ] || printf '<key>kSecTrustSettingsPolicyString</key>\n<string>%s</string>\n' "$str"
+          case "$res" in trustRoot) n=1 ;; trustAsRoot) n=2 ;; deny) n=3 ;; *) n=4 ;; esac
+          printf '<key>kSecTrustSettingsResult</key>\n<integer>%s</integer>\n</dict>\n</array>\n' "$n"
+        fi
+        printf '</dict>\n'
+      done < "$S/admin"
       printf '</dict>\n<key>trustVersion</key>\n<integer>1</integer>\n</dict>\n</plist>\n'
     } > "$2" ;;
   trust-settings-import)
@@ -60,9 +77,9 @@ case "$cmd" in
     sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1 restored/p' "$2" > "$S/admin"
     sync_admin_file ;;
   add-trusted-cert)
-    r=""; p=""; f=""
+    r=""; p=""; str=""; f=""
     while [ $# -gt 0 ]; do
-      case "$1" in -d) shift ;; -r) r="$2"; shift 2 ;; -p) p="$2"; shift 2 ;; -k) shift 2 ;; *) f="$1"; shift ;; esac
+      case "$1" in -d) shift ;; -r) r="$2"; shift 2 ;; -p) p="$2"; shift 2 ;; -s) str="$2"; shift 2 ;; -k) shift 2 ;; *) f="$1"; shift ;; esac
     done
     sha="$(sha1_of "$f")"
     if [ "$sha" = "${FAKE_SEC_SILENT_ADD:-}" ]; then exit 0; fi
@@ -73,7 +90,7 @@ case "$cmd" in
       exit 1
     fi
     drop_admin "$sha"
-    printf '%s %s %s\n' "$sha" "$r" "$p" >> "$S/admin"
+    if [ -n "$str" ]; then printf '%s %s %s %s\n' "$sha" "$r" "$p" "$str" >> "$S/admin"; else printf '%s %s %s\n' "$sha" "$r" "$p" >> "$S/admin"; fi
     grep -q "^$sha\$" "$S/keychain" || printf '%s\n' "$sha" >> "$S/keychain"
     sync_admin_file ;;
   remove-trusted-cert)

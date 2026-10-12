@@ -4,6 +4,7 @@
 #          Writes this release's trust data to $CA_BUILD/data:
 #            ca-certificates.crt  every root Mozilla trusts for websites, each after "# label"
 #            trusted/SHA1.pem     the same roots, one file each, named by SHA-1 for the applier
+#            ca-certificates.sha1 the SHA-1 of each root in ca-certificates.crt, in its order
 #            distrust/SHA1.pem    one per withdrawn.md row, from withdrawn/SHA256.pem
 #            roots.txt            "trusted|distrusted SHA256 label", sorted, for release notes
 #            aquatransport-roots.txt  the roots AquaTransport's root component claims, as committed
@@ -23,10 +24,12 @@ awk -v d="$D/split" '
   /-----END CERTIFICATE-----/ { close(f); f = "" }
 ' "$D/ca-certificates.crt"
 : > "$D/roots.unsorted"
+: > "$D/ca-certificates.sha1"
 for c in "$D"/split/*.pem; do
   s1="$(ca_fingerprint sha1 "$c")" || build_die "$c does not parse"
   s256="$(ca_fingerprint sha256 "$c")" || build_die "$c does not parse"
   cp "$c" "$D/trusted/$s1.pem"
+  printf '%s\n' "$s1" >> "$D/ca-certificates.sha1"
   printf 'trusted %s %s\n' "$s256" "$(cat "$c.label")" >> "$D/roots.unsorted"
 done
 sed -n 's/^| \(.*\) | `\([0-9A-F]\{64\}\)` | .*/\2 \1/p' "$MAVERICKS_ROOT/withdrawn.md" > "$D/withdrawn.rows"

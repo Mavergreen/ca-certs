@@ -1,18 +1,20 @@
 #!/bin/sh
 # platform: macOS-only -- installs a pkg, which on Mac OS X 10.x changes the running system's trust settings
-# spec: docs/TRUST-POLICY.md #4, #6, #8, #9, #10
+# spec: docs/TRUST-POLICY.md #4, #6, #8, #9, #10, #13
 #   usage: CA_CERTS_ONBOX=1 acceptance-onbox.sh PKG [PREVIOUS_PKG]
 #          Installs PREVIOUS_PKG when given, then PKG over it, then reinstalls PKG and uninstalls.
 #          On Mac OS X 10.x, while each is installed, every root it trusts must verify for TLS,
 #          every root it distrusts must not, and every other root must verify as it did before.
 #          On macOS 11 and later, every root must verify as it did before, throughout, and the
-#          admin trust settings and System keychain must never change. Everywhere: the bundle is
-#          at its contract path, the updater runs natively, and uninstall restores everything.
+#          admin trust settings and System keychain must never change. Everywhere: the bundle at
+#          its contract path is the shipped one less exactly the roots this Mac's admin trust
+#          settings deny for TLS, the updater runs natively, and uninstall restores everything.
 #          On failure it uninstalls whatever is installed, so the system is left as it was found.
 set -eu
 [ "${CA_CERTS_ONBOX:-}" = 1 ] || { echo "acceptance-onbox: set CA_CERTS_ONBOX=1 on a Mac whose trust settings it may change -- skipping"; exit 77; }
 R="$(cd "$(dirname "$0")/.." && pwd)"
 . "$R/tests/lib/assert.sh"
+CA_ROOT="" . "$R/payload/libexec/ca-certs-lib.sh"
 PKG="${1:?usage: CA_CERTS_ONBOX=1 acceptance-onbox.sh PKG [PREVIOUS_PKG]}"
 PREV="${2:-}"
 os="$(sw_vers -productVersion)"
@@ -53,10 +55,35 @@ verdicts() {  # one line per root either release carries: NAME trusted|untrusted
     echo "$(basename "$c") $v"
   done
 }
+bundle_sha1s() {  # BUNDLE: the SHA-1 of each certificate in it, one per line, sorted
+  rm -rf "$T/blk"; mkdir "$T/blk"
+  awk -v d="$T/blk" '/-----BEGIN CERTIFICATE-----/ { f = sprintf("%s/%05d.pem", d, ++i) } f { print > f } /-----END CERTIFICATE-----/ { close(f); f = "" }' "$1"
+  for c in "$T"/blk/*.pem; do
+    [ -f "$c" ] || continue
+    openssl x509 -noout -fingerprint -sha1 -in "$c" | sed 's/.*=//' | tr -d :
+  done | LC_ALL=C sort
+}
+check_bundle() {  # LABEL RELEASE: the contract bundle is the shipped one, less exactly what this Mac denies for TLS
+  shipped="$T/$2.p$TREE/etc/openssl/certs/ca-certificates.crt"
+  idx="$T/$2.p$TREE/share/ca-certs/ca-certificates.sha1"
+  sed -n 's/^bundle-omitted //p' "$RECEIPT" | LC_ALL=C sort > "$T/omitted"
+  if [ ! -f "$idx" ]; then
+    cmp -s "$shipped" "$TREE/etc/openssl/certs/ca-certificates.crt" || fail "after the $1, the bundle is not the one the pkg carries"
+    [ ! -s "$T/omitted" ] || fail "after the $1, a release that ships no index left roots out: $(cat "$T/omitted")"
+    return 0
+  fi
+  _x="$(security trust-settings-export -d "$T/admin.plist" >/dev/null 2>&1 && plutil -convert xml1 -o - "$T/admin.plist" || :)"
+  printf '%s\n' "$_x" | ca_ssl_denied_in_xml | LC_ALL=C sort > "$T/denied"
+  LC_ALL=C sort "$idx" > "$T/idx"
+  comm -12 "$T/idx" "$T/denied" > "$T/want-omitted"
+  diff "$T/want-omitted" "$T/omitted" >&2 || fail "after the $1, the receipt's bundle-omitted roots are not exactly the bundle's roots this Mac denies for TLS (diff above)"
+  comm -23 "$T/idx" "$T/omitted" > "$T/want-in"
+  bundle_sha1s "$TREE/etc/openssl/certs/ca-certificates.crt" > "$T/in"
+  diff "$T/want-in" "$T/in" >&2 || fail "after the $1, the bundle is not the shipped one less the denied roots (diff above)"
+}
 expect_installed() {  # LABEL RELEASE: with RELEASE installed, every root's verdict is what it asks for
   verdicts > "$T/$1.v"
-  cmp -s "$T/$2.p$TREE/etc/openssl/certs/ca-certificates.crt" "$TREE/etc/openssl/certs/ca-certificates.crt" \
-    || fail "after the $1, $TREE/etc/openssl/certs/ca-certificates.crt is not the bundle the pkg carries"
+  check_bundle "$1" "$2"
   file "$UPDATER" | grep -q "$hw" || fail "after the $1, the updater has no $hw slice for this $hw Mac: $(file "$UPDATER")"
   if [ "$mode" = bundle ]; then
     grep -q '^keychain no ' "$RECEIPT" || fail "after the $1 on macOS $os, the receipt must say the keychain was left alone: $(cat "$RECEIPT")"
