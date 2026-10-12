@@ -141,6 +141,7 @@ for kind in trusted denied; do
     fi
   done
 done
+ca_note_aquatransport
 ca_filter_bundle
 ca_receipt_set applied "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "ca-certs: $added trust settings added, $kept existing settings left alone (NSS $nss)" >&2

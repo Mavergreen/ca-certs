@@ -260,8 +260,10 @@ automated update, and the release notes already show every change.
 ## 12. Roots AquaTransport's root component also sets are left to it, whichever was installed first
 
 **Decision:** when AquaTransport's "Modern Root Certificates" component has been installed on the
-disk, any root on its list that has an admin trust setting is treated as its setting, not ours. We
-drop it from our record, so no update and no uninstall ever undoes it. Its list is
+disk since ca-certs last ran, any root on its list that has an admin trust setting is treated as its
+setting, not ours. We drop it from our record, so no update and no uninstall ever undoes it. Our
+receipt keeps a checksum of the component's receipt to tell. A setting ca-certs makes while the
+component is already installed is one the component chose not to make, so it stays ours. Its list is
 `aquatransport-roots.txt`, read from the AquaTransport download.
 
 **Why:** that component never undoes its settings, even when AquaTransport is uninstalled. It

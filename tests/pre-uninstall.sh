@@ -14,7 +14,7 @@ mkcert() {
   mv "$T/new.pem" "$2/$_s.pem"
   printf '%s\n' "$_s"
 }
-setup_applied() {
+setup_applied() {  # [at-first]: AquaTransport's root component was installed before us, claiming A
   n=$((n + 1)); ROOT="$T/root$n"; SEC="$T/sec$n"
   TREE="$ROOT/usr/local/mavergreen/ca-certs"; VAR="$ROOT/usr/local/mavergreen/var/ca-certs"
   mkdir -p "$TREE/libexec/mavergreen" "$TREE/share/ca-certs/trusted" "$TREE/share/ca-certs/distrust" "$SEC"
@@ -27,6 +27,11 @@ setup_applied() {
   B="$(mkcert b "$TREE/share/ca-certs/trusted")"
   D="$(mkcert d "$TREE/share/ca-certs/distrust")"
   "$SECURITY" add-trusted-cert -d -r trustRoot -k kc "$TREE/share/ca-certs/trusted/$B.pem"
+  if [ "${1:-}" = at-first ]; then
+    mkdir -p "$ROOT/private/var/db/receipts"
+    : > "$ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.ModernRootCertificates.plist"
+    printf '# fixture\ntrust %s a\n' "$A" > "$TREE/share/ca-certs/aquatransport-roots.txt"
+  fi
   sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "setup apply failed"
   : > "$SEC/log"
 }
@@ -148,5 +153,11 @@ printf '# fixture\ntrust %s a\n' "$A" > "$TREE/share/ca-certs/aquatransport-root
 "$SECURITY" remove-trusted-cert -d "$VAR/certs/$A.pem"
 hook 2>/dev/null || fail "the hook failed"
 if grep -qx "$A" "$SEC/keychain"; then fail "A has no admin setting, so AquaTransport's root component did not set it: the certificate we imported must go: $(cat "$SEC/keychain")"; fi
+
+scenario "a claimed root we set with AquaTransport already installed: it never set it, so our uninstall undoes it"
+setup_applied at-first
+hook 2>/dev/null || fail "the hook failed"
+[ "$(cat "$SEC/admin")" = "$B trustRoot " ] || fail "A's setting is ours, made after AquaTransport's root component ran: it must go: $(cat "$SEC/admin")"
+[ "$(cat "$SEC/keychain")" = "$B" ] || fail "A's certificate is one we imported: it must go: $(cat "$SEC/keychain")"
 
 echo "pre-uninstall: ok"

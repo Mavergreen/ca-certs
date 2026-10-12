@@ -402,7 +402,7 @@ has "trusted $C"; has "imported $C"
 grep -q "^$D deny \$" "$SEC/admin" || fail "AquaTransport's deny for every use must stand, not be replaced by our TLS-only one: $(cat "$SEC/admin")"
 if grep -q -E '^(add-trusted-cert|remove-trusted-cert|delete-certificate)' "$SEC/log"; then fail "handing roots over changes no setting: $(cat "$SEC/log")"; fi
 
-scenario "a claimed root with no admin setting stays ours: AquaTransport's root component never set it"
+scenario "a claimed root with no admin setting stays ours, on this run and the next: AquaTransport's root component never set it"
 fresh
 A="$(mkcert a "$TREE/share/ca-certs/trusted")"
 mkdir -p "$ROOT/private/var/db/receipts"
@@ -410,6 +410,15 @@ mkdir -p "$ROOT/private/var/db/receipts"
 printf '# fixture\ntrust %s a\n' "$A" > "$TREE/share/ca-certs/aquatransport-roots.txt"
 apply 2>/dev/null || fail "apply failed"
 has "trusted $A"; has "imported $A"; lacks "preexisting $A"
+apply 2>/dev/null || fail "the second apply failed"
+has "trusted $A"; has "imported $A"; lacks "preexisting $A"
+
+scenario "AquaTransport's root component ran again after us: the next run hands A over"
+echo reinstalled > "$ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.ModernRootCertificates.plist"
+: > "$SEC/log"
+apply 2>/dev/null || fail "the run after AquaTransport's reinstall failed"
+lacks "trusted $A"; lacks "imported $A"; has "preexisting $A"
+if grep -q -E '^(add-trusted-cert|remove-trusted-cert|delete-certificate)' "$SEC/log"; then fail "handing roots over changes no setting: $(cat "$SEC/log")"; fi
 
 mkbundle() {  # the bundle the pkg ships: share/ca-certs/ca-certificates.crt, its .sha1 index, and the contract copy
   _b="$TREE/share/ca-certs/ca-certificates.crt"; : > "$_b"; : > "$TREE/share/ca-certs/ca-certificates.sha1"

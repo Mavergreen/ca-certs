@@ -127,14 +127,25 @@ ca_undo_import() {
 }
 
 # spec: docs/TRUST-POLICY.md #12 -- AquaTransport's "Modern Root Certificates" component never undoes
-#       its trust settings and skips a root already in System.keychain, so once its receipt is on
-#       this volume, a root its list names that has an admin setting is its, not ours: dropping our
-#       lines for it means no run and no uninstall ever undoes it, and the next run records it
-#       preexisting as it does any setting it finds
+#       its trust settings and skips a root already in System.keychain, so when its receipt has
+#       changed since our last run, it ran after us, and a root its list names that has an admin
+#       setting is its, not ours: dropping our lines for it means no run and no uninstall ever
+#       undoes it, and the next run records it preexisting as it does any setting it finds. A
+#       setting we made with its receipt already in place is one it chose not to make, so it stays ours.
 CA_AT_RECEIPT="$CA_ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.ModernRootCertificates.plist"
 CA_AT_ROOTS="$CA_TREE/share/ca-certs/aquatransport-roots.txt"
+ca_at_stamp() {
+  [ -f "$CA_AT_RECEIPT" ] || return 0
+  _st="$(cksum < "$CA_AT_RECEIPT")" || ca_die "could not read $CA_AT_RECEIPT"
+  printf '%s\n' "$_st" | awk '{ print $1 "-" $2 }'
+}
+ca_note_aquatransport() {
+  _st="$(ca_at_stamp)"
+  [ -z "$_st" ] || ca_receipt_set aquatransport "$_st"
+}
 ca_cede_to_aquatransport() {
   [ -f "$CA_AT_RECEIPT" ] && [ -f "$CA_AT_ROOTS" ] || return 0
+  [ "$(ca_at_stamp)" != "$(ca_receipt_value aquatransport)" ] || return 0
   _claimed="$(awk '($1 == "trust" || $1 == "distrust") && $2 ~ /^[0-9A-F]+$/ && length($2) == 40 { print $2 }' "$CA_AT_ROOTS")" \
     || ca_die "could not read $CA_AT_ROOTS"
   [ -n "$_claimed" ] || return 0
