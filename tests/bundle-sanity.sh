@@ -20,4 +20,5 @@ for f in "$D"/distrust/*.pem; do
 done
 [ "$(grep -c '^trusted ' "$D/roots.txt")" = "$n" ] || fail "roots.txt does not list every trusted root"
 [ "$(grep -c '^distrusted ' "$D/roots.txt")" = "$(ls "$D/distrust" | grep -c '\.pem$')" ] || fail "roots.txt does not list every distrusted root"
+cmp -s "$D/aquatransport-roots.txt" "$R/aquatransport-roots.txt" || fail "the build must carry aquatransport-roots.txt as committed"
 echo "bundle-sanity: ok ($n trusted)"

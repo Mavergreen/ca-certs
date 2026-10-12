@@ -7,6 +7,7 @@ what other products can rely on once it's installed, and how to uninstall it.
 |---|---|---|---|
 | Mozilla NSS `certdata.txt` (own upstream) | `NSS_TAG` (`NSS_x_y[_z]_RTM`) | ✅ `github-tags` on `mozilla/nss`, regex versioning | `build/version.sh` cuts `<x.y.z>-mavericks.1` |
 | Withdrawn roots | `withdrawn.md` + `withdrawn/` | not an ingredient: our own reviewed policy | a change moves the declared state below; the nightly backstop re-cuts it, or `workflow_dispatch local_release=true` ships it immediately |
+| AquaTransport's root list | `aquatransport-roots.txt` | ❌ untrackable by Renovate: the DMG's URL is overwritten in place, so no feed names a release. `aquatransport-roots.yml` compares it with the live DMG daily and goes red when they differ | regenerate with `build/aquatransport-roots.sh`, read the difference, commit; that moves the declared state below and cuts a release |
 | MacOSX SDK, Sparkle, packaging helpers | `Mavergreen/shipyard@v1` | ✅ github-actions manager | `@v1` moves without a pin change; nothing repackages by itself |
 
 `UPSTREAM_VERSION` is derived from `NSS_TAG` by `build/derive-upstream-version.sh` and is
@@ -20,10 +21,14 @@ needs no hand-pasted hash.
 
 - upstream: NSS_TAG
 - withdrawn: withdrawn.md
+- aquatransport-roots: aquatransport-roots.txt
 
 `withdrawn.md` is declared because a change to it is a change to what machines trust, and should
 ship. Its certificates in `withdrawn/` are pinned by the fingerprints `withdrawn.md` lists
 (`tests/withdrawn.sh`).
+
+`aquatransport-roots.txt` is declared for the same reason: it decides which trust settings ca-certs
+leaves to AquaTransport (docs/TRUST-POLICY.md #12).
 
 Any edit to `withdrawn.md` changes the declared state and cuts a release, prose included, because
 the whole file is hashed, not just its table.
@@ -67,8 +72,8 @@ those pages with its own spelling (`nss_3_130.html`, `nss_3_126_1.html`), so the
 
     sudo mavergreen uninstall ca-certs
 
-This reverses exactly what the receipt records. It leaves your own settings alone
-(`docs/TRUST-POLICY.md` #8).
+This reverses exactly what the receipt records. It leaves your own settings, and AquaTransport's,
+alone (`docs/TRUST-POLICY.md` #8, #12).
 
 To go back to the trust settings from before the first install, all at once, run this **before**
 uninstalling, because uninstall deletes `/usr/local/mavergreen/var/ca-certs/`, where the saved copy

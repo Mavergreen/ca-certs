@@ -24,4 +24,6 @@ h="$tree/libexec/mavergreen/pre-uninstall"
 grep -q 'ca-certs-apply' "$post" || fail "the postinstall does not run the applier"
 n="$(grep -c 'BEGIN CERTIFICATE' "$tree/etc/openssl/certs/ca-certificates.crt")"
 [ "$(ls "$tree/share/ca-certs/trusted" | grep -c '\.pem$')" = "$n" ] || fail "per-root files and the bundle disagree"
+cmp -s "$tree/share/ca-certs/aquatransport-roots.txt" "$R/aquatransport-roots.txt" \
+  || fail "the pkg must carry aquatransport-roots.txt as committed: the applier and uninstall read it to leave AquaTransport's roots alone"
 echo "package-pkg: ok ($n roots)"

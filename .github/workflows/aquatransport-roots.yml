@@ -1,0 +1,32 @@
+name: aquatransport-roots
+
+# spec: docs/TRUST-POLICY.md #12, build/aquatransport-roots.sh -- aquatransport-roots.txt lists the roots
+#       AquaTransport's "Modern Root Certificates" component claims, which ca-certs leaves alone.
+#       Its one download URL is overwritten in place, so no feed names a release and Renovate has
+#       nothing to read: this compares the live DMG's list with ours daily and goes red when they
+#       differ. The fix is to regenerate the file with build/aquatransport-roots.sh, read the
+#       difference, and commit it, which cuts a release. The DMG is read (mounted read-only and
+#       expanded), never run, and this job can write nothing.
+
+on:
+  schedule:
+    - cron: '43 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Compare the live download's root list with ours
+        run: |
+          set -eu
+          d="$(mktemp -d)"
+          curl -fsSL -o "$d/AquaTransport.dmg" https://mavericksforever.com/downloads/AquaTransport.dmg
+          sh build/aquatransport-roots.sh --check aquatransport-roots.txt "$d/AquaTransport.dmg"

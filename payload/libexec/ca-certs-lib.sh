@@ -121,3 +121,24 @@ ca_undo_import() {
   _kc="$(ca_kc_keys)"
   if ca_in "$1" "$_kc"; then ca_die "security reported deleting $1 but it is still in $CA_KC"; fi
 }
+
+# spec: docs/TRUST-POLICY.md #12 -- AquaTransport's "Modern Root Certificates" component never undoes
+#       its trust settings and skips a root already in System.keychain, so once its receipt is on
+#       this volume, a root its list names that has an admin setting is its, not ours: dropping our
+#       lines for it means no run and no uninstall ever undoes it, and the next run records it
+#       preexisting as it does any setting it finds
+CA_AT_RECEIPT="$CA_ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.ModernRootCertificates.plist"
+CA_AT_ROOTS="$CA_TREE/share/ca-certs/aquatransport-roots.txt"
+ca_cede_to_aquatransport() {
+  [ -f "$CA_AT_RECEIPT" ] && [ -f "$CA_AT_ROOTS" ] || return 0
+  _claimed="$(awk '($1 == "trust" || $1 == "distrust") && $2 ~ /^[0-9A-F]+$/ && length($2) == 40 { print $2 }' "$CA_AT_ROOTS")" \
+    || ca_die "could not read $CA_AT_ROOTS"
+  [ -n "$_claimed" ] || return 0
+  _admin="$(ca_admin_keys)"
+  for _at in $_claimed; do
+    ca_in "$_at" "$_admin" || continue
+    for _atk in trusted denied imported; do
+      if ca_receipt_has "$_atk" "$_at"; then ca_receipt_drop "$_atk" "$_at"; fi
+    done
+  done
+}

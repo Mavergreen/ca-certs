@@ -384,4 +384,31 @@ if apply FAKE_SEC_FAIL_ONCE=trust-settings-export 2>"$T/err"; then fail "a faile
 grep -q "could not back up" "$T/err" || fail "the failure must explain what happened: $(cat "$T/err")"
 grep -q "FAKE_SEC_FAIL_ONCE" "$T/err" || fail "the failure must carry security's own reason: $(cat "$T/err")"
 
+scenario "AquaTransport's root component ran after us: the next run hands the roots it claims over"
+fresh
+A="$(mkcert a "$TREE/share/ca-certs/trusted")"
+C="$(mkcert c "$TREE/share/ca-certs/trusted")"
+D="$(mkcert d "$TREE/share/ca-certs/distrust")"
+apply 2>/dev/null || fail "first apply failed"
+mkdir -p "$ROOT/private/var/db/receipts"
+: > "$ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.ModernRootCertificates.plist"
+printf '# fixture\ntrust %s a\ndistrust %s d\n' "$A" "$D" > "$TREE/share/ca-certs/aquatransport-roots.txt"
+"$SECURITY" add-trusted-cert -d -r deny -k kc "$TREE/share/ca-certs/distrust/$D.pem"
+: > "$SEC/log"
+apply 2>/dev/null || fail "the run after AquaTransport's failed"
+lacks "trusted $A"; lacks "imported $A"; has "preexisting $A"
+lacks "denied $D"; lacks "imported $D"; has "preexisting $D"
+has "trusted $C"; has "imported $C"
+grep -q "^$D deny \$" "$SEC/admin" || fail "AquaTransport's deny for every use must stand, not be replaced by our TLS-only one: $(cat "$SEC/admin")"
+if grep -q -E '^(add-trusted-cert|remove-trusted-cert|delete-certificate)' "$SEC/log"; then fail "handing roots over changes no setting: $(cat "$SEC/log")"; fi
+
+scenario "a claimed root with no admin setting stays ours: AquaTransport's root component never set it"
+fresh
+A="$(mkcert a "$TREE/share/ca-certs/trusted")"
+mkdir -p "$ROOT/private/var/db/receipts"
+: > "$ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.ModernRootCertificates.plist"
+printf '# fixture\ntrust %s a\n' "$A" > "$TREE/share/ca-certs/aquatransport-roots.txt"
+apply 2>/dev/null || fail "apply failed"
+has "trusted $A"; has "imported $A"; lacks "preexisting $A"
+
 echo "apply: ok"

@@ -13,6 +13,7 @@ CA_ROOT="${MAVERGREEN_ROOT:-/}"; CA_ROOT="${CA_ROOT%/}"
 #       (ca_receipt_changes exits 1), so the uninstall stops with the record and every change in place
 ca_receipt_changes || exit 0
 ca_is_booted_root || ca_die "the trust changes in $CA_RECEIPT belong to the system on $CA_ROOT/; boot from it and run 'mavergreen uninstall ca-certs' there. Nothing was removed."
+ca_cede_to_aquatransport
 for kind in trusted denied; do
   recorded="$(ca_receipt_list "$kind")"
   for sha in $recorded; do

@@ -26,6 +26,7 @@ Measured on 2026-09-25, on a real Mac OS X 10.9.5 machine, against NSS 3.130.
 9. Every change is recorded and can be undone.
 10. On macOS 11 and later, only the bundle file is installed.
 11. Updates are automatic, and every release says what changed.
+12. Roots AquaTransport's root component also sets are left to it, whichever was installed first.
 
 ---
 
@@ -254,3 +255,40 @@ by name and fingerprint.
 
 **Instead of:** keeping the generated certificate files in the repository. They'd be stale in every
 automated update, and the release notes already show every change.
+
+## 12. Roots AquaTransport's root component also sets are left to it, whichever was installed first
+
+**Decision:** when AquaTransport's "Modern Root Certificates" component has been installed on the
+disk, any root on its list that has an admin trust setting is treated as its setting, not ours. We
+drop it from our record, so no update and no uninstall ever undoes it. Its list is
+`aquatransport-roots.txt`, read from the AquaTransport download.
+
+**Why:** that component never undoes its settings, even when AquaTransport is uninstalled. It
+skips a root that's already in the System keychain, and denies its 7 roots for every use, replacing
+any setting already there. So when it's installed *after* ca-certs, it leaves no trace for the roots
+we'd already added. Without this rule, uninstalling ca-certs would take away the trust it meant to
+add (Let's Encrypt, Amazon, Google and others) and its 7 denials. Installed *before* ca-certs, its
+settings already exist, and #8 leaves them alone.
+
+**Instead of:**
+
+| Alternative | Why not |
+|---|---|
+| Say in the README which order to install in | Every AquaTransport update runs the root component again unless you uncheck it, so the order isn't really yours to keep. |
+| Warn at uninstall only | You'd still lose the roots; the warning only says so. |
+| Read AquaTransport's list from its source repository | The download is what's installed. The repository can differ from it. |
+
+**What this costs:** a root on AquaTransport's list keeps its trust after you uninstall ca-certs,
+even if you installed ca-certs first. That's what the root component would have done on its own.
+The list comes from the current download, not the version you installed. A root a newer version
+added is left alone even if your older one never set it.
+
+**How it stays current:** the download's address never changes, so nothing announces a new version.
+A daily check (`aquatransport-roots.yml`) compares the download's list with ours and fails when they
+differ. A person then regenerates the file with `build/aquatransport-roots.sh`, reads the change and
+commits it, which cuts a release. The build refuses to ship if AquaTransport trusts a root we
+distrust, or the other way round. Today the two lists agree: its 14 trusted roots are all among
+ours, and its 7 distrusted roots are all in `withdrawn.md`.
+
+**Reconsider when:** AquaTransport records its own claims somewhere we can read, or stops shipping
+its root component.

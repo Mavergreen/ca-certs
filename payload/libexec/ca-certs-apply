@@ -55,6 +55,7 @@ if [ -z "$backup_rec" ]; then
 fi
 ca_receipt_set nss "$nss"
 ca_receipt_set keychain yes
+ca_cede_to_aquatransport
 
 # spec: docs/TRUST-POLICY.md #9 -- reconcile the receipt against the trust store on every run, with
 #       plain assignments that die before anything changes if either listing itself fails, so a

@@ -116,4 +116,37 @@ hook 2>/dev/null || fail "the retry must finish the undo"
 if grep -q -E '^(trusted|denied|imported) ' "$VAR/receipt"; then fail "the retry must leave nothing recorded"; fi
 [ "$(cat "$SEC/keychain")" = "$B" ] || fail "the retry must delete what we imported: $(cat "$SEC/keychain")"
 
+scenario "AquaTransport's root component ran after us: the roots it claims outlive our uninstall, ours go"
+setup_applied
+C="$(mkcert c "$TREE/share/ca-certs/trusted")"
+sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "applying C failed"
+mkdir -p "$ROOT/private/var/db/receipts"
+: > "$ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.ModernRootCertificates.plist"
+printf '# fixture\ntrust %s a\ndistrust %s d\n' "$A" "$D" > "$TREE/share/ca-certs/aquatransport-roots.txt"
+"$SECURITY" add-trusted-cert -d -r deny -k kc "$TREE/share/ca-certs/distrust/$D.pem"
+: > "$SEC/log"
+hook 2>/dev/null || fail "the hook failed"
+grep -q "^$A trustRoot " "$SEC/admin" || fail "AquaTransport's root component also trusts A, and never undoes that: our uninstall must leave A trusted: $(cat "$SEC/admin")"
+grep -q "^$D deny \$" "$SEC/admin" || fail "AquaTransport's root component denies D for every use: our uninstall must leave that: $(cat "$SEC/admin")"
+grep -qx "$A" "$SEC/keychain" && grep -qx "$D" "$SEC/keychain" \
+  || fail "A and D must stay in System.keychain, where AquaTransport's settings need them: $(cat "$SEC/keychain")"
+if grep -q "^$C " "$SEC/admin"; then fail "C is ours alone: its trust must go"; fi
+if grep -qx "$C" "$SEC/keychain"; then fail "C is ours alone: the certificate we imported must go"; fi
+
+scenario "the same claims without AquaTransport's receipt: everything we recorded is undone"
+setup_applied
+printf '# fixture\ntrust %s a\ndistrust %s d\n' "$A" "$D" > "$TREE/share/ca-certs/aquatransport-roots.txt"
+hook 2>/dev/null || fail "the hook failed"
+[ "$(cat "$SEC/admin")" = "$B trustRoot " ] || fail "with no AquaTransport receipt, its list claims nothing: $(cat "$SEC/admin")"
+[ "$(cat "$SEC/keychain")" = "$B" ] || fail "with no AquaTransport receipt, everything we imported goes: $(cat "$SEC/keychain")"
+
+scenario "a claimed root whose setting someone removed by hand: we still delete the certificate we imported"
+setup_applied
+mkdir -p "$ROOT/private/var/db/receipts"
+: > "$ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.ModernRootCertificates.plist"
+printf '# fixture\ntrust %s a\n' "$A" > "$TREE/share/ca-certs/aquatransport-roots.txt"
+"$SECURITY" remove-trusted-cert -d "$VAR/certs/$A.pem"
+hook 2>/dev/null || fail "the hook failed"
+if grep -qx "$A" "$SEC/keychain"; then fail "A has no admin setting, so AquaTransport's root component did not set it: the certificate we imported must go: $(cat "$SEC/keychain")"; fi
+
 echo "pre-uninstall: ok"

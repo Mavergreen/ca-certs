@@ -6,6 +6,7 @@
 #            trusted/SHA1.pem     the same roots, one file each, named by SHA-1 for the applier
 #            distrust/SHA1.pem    one per withdrawn.md row, from withdrawn/SHA256.pem
 #            roots.txt            "trusted|distrusted SHA256 label", sorted, for release notes
+#            aquatransport-roots.txt  the roots AquaTransport's root component claims, as committed
 # spec: tests/bundle-sanity.sh
 set -eu
 . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
@@ -39,5 +40,8 @@ while read -r s256 name; do
   printf 'distrusted %s %s\n' "$s256" "$name" >> "$D/roots.unsorted"
 done < "$D/withdrawn.rows"
 sort "$D/roots.unsorted" > "$D/roots.txt"
+cp "$MAVERICKS_ROOT/aquatransport-roots.txt" "$D/aquatransport-roots.txt"
+sh "$MAVERICKS_ROOT/build/aquatransport-conflicts.sh" "$D/aquatransport-roots.txt" "$D/trusted" "$D/distrust" \
+  || build_die "AquaTransport's root list disagrees with this release (above)"
 rm -rf "$D/split" "$D/roots.unsorted" "$D/withdrawn.rows"
 echo "build-bundle: $(grep -c '^trusted ' "$D/roots.txt") trusted, $(grep -c '^distrusted ' "$D/roots.txt") distrusted" >&2
