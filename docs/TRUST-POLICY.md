@@ -24,8 +24,9 @@ Measured on 2026-09-25, on a real Mac OS X 10.9.5 machine, against NSS 3.130.
 
 8. A trust setting that already exists is never touched.
 9. Every change is recorded and can be undone.
-10. On macOS 11 and later, only the bundle file is installed.
-11. Updates are automatic, and every release says what changed.
+10. On macOS 11 and later, and on a disk you haven't booted from, only the bundle file is installed.
+11. Updates are automatic, each release is tested on 10.9 and current macOS first, and every release
+    says what changed.
 12. Roots AquaTransport's root component also sets are left to it, whichever was installed first.
 13. The bundle never holds a root this Mac's admin trust settings deny for secure websites.
 
@@ -63,6 +64,10 @@ both the keychain and the bundle. As of NSS 3.130 that's one root: Izenpe.com, d
 
 **Instead of:** including it, as curl's bundle does. Neither the keychain nor a PEM file can express
 "only before a date", so including it would also trust newer certificates that Mozilla rejects.
+
+**What this doesn't do:** leaving a root out doesn't distrust it. When Apple ships it too, as 10.9
+ships Izenpe.com, the keychain still trusts it, and so do Safari and Go. Only #5's denials take trust
+away, and #5 says why there aren't more of them.
 
 ## 4. Added roots are trusted for all uses
 
@@ -236,7 +241,7 @@ and every certificate imported. Uninstall reverses exactly that record.
 Uninstalling from a disk you haven't booted from is refused while that disk's record lists changes.
 Its trust settings can only be undone by booting from it, and removing the record would strand them.
 
-## 10. On macOS 11 and later, only the bundle file is installed
+## 10. On macOS 11 and later, and on a disk you haven't booted from, only the bundle file is installed
 
 **Decision:** install the PEM bundle and change no trust settings. From Big Sur on, macOS requires a
 password to change admin trust.
@@ -248,11 +253,26 @@ password to change admin trust.
 | Refuse to install | Developers on modern Macs would lose the bundle other products rely on. |
 | Prompt for a password | `security` itself would ask for the password, which an installer script can't answer. |
 
-## 11. Updates are automatic, and every release says what changed
+**The same on a disk you haven't booted from, on any macOS:** `security` changes only the running
+system's trust settings. So installing onto another disk installs the bundle as shipped and changes
+no settings, and that disk's record says `keychain no` with the reason. Its trust settings are applied
+at the first install or update made while running from it.
+
+## 11. Updates are automatic, each release is tested on 10.9 and current macOS first, and every release says what changed
 
 **Decision:** each new NSS release is picked up, rebuilt, and released if the build and its checks
 pass. Each release's notes list the roots added, removed and distrusted since the previous release,
 by name and fingerprint.
+
+An update also takes back what the new release no longer asks for. A root it stops trusting loses
+the setting we added, and the certificate we imported is deleted. A root it stops distrusting loses
+our deny. Settings that aren't ours (#8, #12) stay.
+
+**Tested before it ships:** a release is published only after its pkg passes on a 10.9 virtual
+machine and on the newest macOS, on both Apple Silicon and Intel. Each run installs it, upgrades to it
+from the previous release when there is one, reinstalls it and uninstalls it. On 10.9, every root's verdict is checked
+against what the release asks for, and the trust settings must come back exactly as they were. On
+current macOS, nothing but the bundle may change.
 
 **Instead of:** keeping the generated certificate files in the repository. They'd be stale in every
 automated update, and the release notes already show every change.

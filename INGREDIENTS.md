@@ -62,6 +62,11 @@ those pages with its own spelling (`nss_3_130.html`, `nss_3_126_1.html`), so the
   It is registered with ca-certs' short name in shipyard's `scripts/product-names`, and won't move.
   It holds every root Mozilla trusts for websites (`docs/TRUST-POLICY.md` #2, #3), on every macOS,
   less any root the running Mac's admin trust settings deny for TLS (#13).
+- **Only root can change it:** every file under `/usr/local/mavergreen/ca-certs` is owned by root,
+  and only the installer, running as root, rewrites the bundle.
+- **Who it's for:** programs that can't read the keychain. A program that reads the keychain too
+  should let the keychain's denials win, as Mavergreen's Go toolchains do: they add the bundle to what
+  they trust, never in front of the keychain.
 - **Installed?** `/usr/local/mavergreen/ca-certs/mavergreen.plist` exists. Its `version` key is the
   release (`3.130.0-mavericks.1`).
 - **Which Mozilla data?** `/usr/local/mavergreen/var/ca-certs/receipt` has a line `nss <version>`

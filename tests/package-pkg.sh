@@ -29,4 +29,7 @@ cmp -s "$tree/share/ca-certs/aquatransport-roots.txt" "$R/aquatransport-roots.tx
 cmp -s "$tree/share/ca-certs/ca-certificates.crt" "$tree/etc/openssl/certs/ca-certificates.crt" \
   || fail "the pkg must ship the bundle a second time, in share/, so the applier can rebuild the contract copy from it"
 [ "$(wc -l < "$tree/share/ca-certs/ca-certificates.sha1" | tr -d ' ')" = "$n" ] || fail "the pkg must ship ca-certificates.sha1, one SHA-1 per certificate"
+owners="$(for b in "$T"/x/*.pkg/Bom; do lsbom -p fug "$b"; done \
+  | awk -F '\t' '$1 ~ /^\.\/usr\/local\/mavergreen\/ca-certs(\/|$)/ { print $2 "/" $3 }' | sort -u)"
+[ "$owners" = 0/0 ] || fail "every file under usr/local/mavergreen/ca-certs must be root's (a consumer refuses a bundle anyone else could write); owners: $owners"
 echo "package-pkg: ok ($n roots)"
