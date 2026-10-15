@@ -13,14 +13,14 @@ base="https://ftp.mozilla.org/pub/security/nss/releases/$tag/src"
 tarball="nss-$v.tar.gz"
 cache="$MAVERICKS_BUILD_ROOT/ca-certs-cache"
 mkdir -p "$cache" "$out"
-sums="$(curl -fsSL "$base/SHA256SUMS")" || build_die "could not download $base/SHA256SUMS"
+. "$SHIPYARD/mavericks_fetch.sh"
+sums="$(shipyard_curl "$base/SHA256SUMS" -)" || build_die "could not download $base/SHA256SUMS"
 sha="$(printf '%s\n' "$sums" | awk -v f="$tarball" '$2 == f || $2 == ("*" f) { print $1 }')"
 case "$sha" in
   *[!0-9a-f]*|'') build_die "$tarball is not listed in $base/SHA256SUMS; refusing an unverified download" ;;
 esac
 [ "${#sha}" -eq 64 ] || build_die "$base/SHA256SUMS lists '$sha' for $tarball, which is not a SHA-256"
 member="nss-$v/nss/lib/ckfw/builtins/certdata.txt"
-. "$SHIPYARD/mavericks_fetch.sh"
-mav_fetch_pinned "$base/$tarball" "$sha" "$cache" "$tarball" "$member" || build_die "fetching $tarball failed"
+shipyard_fetch_pinned "$base/$tarball" "$sha" "$cache" "$tarball" "$member" || build_die "fetching $tarball failed"
 [ -s "$cache/$member" ] || build_die "$tarball has no $member"
 cp "$cache/$member" "$out/certdata.txt"

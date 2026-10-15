@@ -24,9 +24,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Install shipyard
+        uses: Mavergreen/shipyard/.github/actions/install@v1
       - name: Compare the live download's root list with ours
         run: |
           set -eu
           d="$(mktemp -d)"
-          curl -fsSL -o "$d/AquaTransport.dmg" https://mavericksforever.com/downloads/AquaTransport.dmg
+          . "$SHIPYARD_SCRIPTS/mavericks_fetch.sh"
+          shipyard_curl https://mavericksforever.com/downloads/AquaTransport.dmg "$d/AquaTransport.dmg"
           sh build/aquatransport-roots.sh --check aquatransport-roots.txt "$d/AquaTransport.dmg"
