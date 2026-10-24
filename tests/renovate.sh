@@ -11,8 +11,9 @@ if command -v python3 >/dev/null 2>&1; then
 fi
 grep -q '"github>Mavergreen/shipyard"' "$J" || fail "must extend the shipyard preset"
 grep -q '"/^NSS_TAG\$/"' "$J" || fail "must match the NSS_TAG file"
-grep -q '"packageNameTemplate": "mozilla/nss"' "$J" || fail "must track mozilla/nss"
-grep -q '"datasourceTemplate": "github-tags"' "$J" || fail "must use github-tags"
+grep -q '"datasourceTemplate": "custom.nss-releases"' "$J" || fail "must track Mozilla's release directory, not mozilla/nss's tags: a tag can precede its SHA256SUMS by hours, and a bump proposed then fails its build with nothing to re-run it"
+grep -q '"defaultRegistryUrlTemplate": "https://ftp.mozilla.org/pub/security/nss/releases/"' "$J" || fail "nss-releases must read the directory fetch-certdata.sh downloads from"
+grep -q '"format": "html"' "$J" || fail "nss-releases must read the directory listing as html links"
 grep -q 'regex:^NSS_(?<major>' "$J" || fail "must order tags with regex versioning, or NSS_3_126_1_RTM and NSS_3_130_RTM compare as strings"
 if grep -q -E '"ignoreTests"|"automerge"' "$J"; then fail "the shipyard preset sets automerge and ignoreTests; restating them is check 4's failure"; fi
 echo "renovate: ok"

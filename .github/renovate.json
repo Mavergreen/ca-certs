@@ -1,14 +1,21 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["github>Mavergreen/shipyard"],
+  "customDatasources": {
+    "nss-releases": {
+      "description": "Mozilla's NSS release directory, which fetch-certdata.sh downloads from. A release appears here with its tarball and SHA256SUMS, sometimes hours after its git tag.",
+      "defaultRegistryUrlTemplate": "https://ftp.mozilla.org/pub/security/nss/releases/",
+      "format": "html"
+    }
+  },
   "customManagers": [
     {
       "customType": "regex",
       "managerFilePatterns": ["/^NSS_TAG$/"],
       "matchStrings": ["^\\s*(?<currentValue>NSS_\\S+_RTM)\\s*$"],
       "depNameTemplate": "nss",
-      "packageNameTemplate": "mozilla/nss",
-      "datasourceTemplate": "github-tags",
+      "datasourceTemplate": "custom.nss-releases",
+      "extractVersionTemplate": "^(?:.*/)?(?<version>NSS_\\d+_\\d+(?:_\\d+)?_RTM)/?$",
       "versioningTemplate": "regex:^NSS_(?<major>\\d+)_(?<minor>\\d+)(?:_(?<patch>\\d+))?_RTM$"
     }
   ]
