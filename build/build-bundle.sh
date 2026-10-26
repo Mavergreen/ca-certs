@@ -45,6 +45,7 @@ done < "$D/withdrawn.rows"
 sort "$D/roots.unsorted" > "$D/roots.txt"
 cp "$MAVERICKS_ROOT/aquatransport-roots.txt" "$D/aquatransport-roots.txt"
 sh "$MAVERICKS_ROOT/build/aquatransport-conflicts.sh" "$D/aquatransport-roots.txt" "$D/trusted" "$D/distrust" \
+  "$MAVERICKS_ROOT/aquatransport-differences.txt" \
   || build_die "AquaTransport's root list disagrees with this release (above)"
 rm -rf "$D/split" "$D/roots.unsorted" "$D/withdrawn.rows"
 echo "build-bundle: $(grep -c '^trusted ' "$D/roots.txt") trusted, $(grep -c '^distrusted ' "$D/roots.txt") distrusted" >&2

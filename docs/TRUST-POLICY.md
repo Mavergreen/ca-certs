@@ -309,10 +309,13 @@ added is left alone even if your older one never set it.
 **How it stays current:** the download's address never changes, so nothing announces a new version.
 A daily check (`aquatransport-roots.yml`) compares the download's list with ours and fails when they
 differ. A person then regenerates the file with `build/aquatransport-roots.sh`, reads the change and
-commits it, which cuts a release. The build refuses to ship if AquaTransport trusts a root we
-distrust, or the other way round. Today the two lists agree: its 15 trusted roots are all among
-ours, and of its 8 distrusted roots, 7 are in `withdrawn.md` and the eighth, AAA Certificate
-Services, Mozilla trusts only for email, so our bundle never held it.
+commits it, which cuts a release. Handing roots over is simplest to reason about when its choices
+are a subset of ours, so the build refuses to ship unless every root it trusts we trust, and every
+root it distrusts is in `withdrawn.md`. A contradiction is never allowed. Any other difference
+needs a line, with its reason, in `aquatransport-differences.txt`, and a line there that no longer
+differs fails too. Today there is one: AquaTransport distrusts AAA Certificate Services, which
+Mozilla dropped for websites for age, not cause (#5), and which 10.9's own TLS code may still need
+for Sectigo's older cross-signed chains.
 
 **Reconsider when:** AquaTransport records its own claims somewhere we can read, or stops shipping
 its root component.

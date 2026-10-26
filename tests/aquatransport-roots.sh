@@ -52,16 +52,60 @@ grep -q "Old Root" "$T/diff" || fail "--check must show the root that differs: $
 
 scenario "aquatransport-conflicts.sh fails when AquaTransport trusts a root we distrust, or the other way round"
 mkdir -p "$T/ours/trusted" "$T/ours/distrust"
+: > "$T/none"
 cp "$T/s/trust/Root One.pem" "$T/ours/trusted/$ONE.pem"; cp "$T/s/distrust/Old Root.pem" "$T/ours/distrust/$OLD.pem"
-sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" >/dev/null 2>&1 || fail "aquatransport-conflicts.sh must pass when we agree"
+sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/none" >/dev/null 2>&1 || fail "aquatransport-conflicts.sh must pass when we agree"
 mv "$T/ours/distrust/$OLD.pem" "$T/ours/trusted/$OLD.pem"
-rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" > "$T/c" 2>&1 || rc=$?
+rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/none" > "$T/c" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || fail "aquatransport-conflicts.sh must fail when AquaTransport distrusts a root we trust"
 grep -q "$OLD" "$T/c" || fail "aquatransport-conflicts.sh must name the root: $(cat "$T/c")"
 mv "$T/ours/trusted/$ONE.pem" "$T/ours/distrust/$ONE.pem"; mv "$T/ours/trusted/$OLD.pem" "$T/ours/distrust/$OLD.pem"
-rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" > "$T/c" 2>&1 || rc=$?
+rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/none" > "$T/c" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] || fail "aquatransport-conflicts.sh must fail when AquaTransport trusts a root we distrust"
 grep -q "$ONE" "$T/c" || fail "aquatransport-conflicts.sh must name the root: $(cat "$T/c")"
+
+scenario "aquatransport-conflicts.sh fails when AquaTransport trusts or distrusts a root we have no position on"
+rm -rf "$T/ours"; mkdir -p "$T/ours/trusted" "$T/ours/distrust"
+cp "$T/s/distrust/Old Root.pem" "$T/ours/distrust/$OLD.pem"
+rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/none" > "$T/c" 2>&1 || rc=$?
+[ "$rc" -eq 1 ] || fail "aquatransport-conflicts.sh must fail when AquaTransport trusts a root we don't, exited $rc"
+grep -q "$ONE" "$T/c" || fail "aquatransport-conflicts.sh must name the root we don't trust: $(cat "$T/c")"
+rm -rf "$T/ours"; mkdir -p "$T/ours/trusted" "$T/ours/distrust"
+cp "$T/s/trust/Root One.pem" "$T/ours/trusted/$ONE.pem"
+rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/none" > "$T/c" 2>&1 || rc=$?
+[ "$rc" -eq 1 ] || fail "aquatransport-conflicts.sh must fail when AquaTransport distrusts a root we don't, exited $rc"
+grep -q "$OLD" "$T/c" || fail "aquatransport-conflicts.sh must name the root we don't distrust: $(cat "$T/c")"
+
+scenario "a declared difference, with its reason, excuses only the root it names"
+printf '# why\ndistrust %s we leave it alone for a reason\n' "$OLD" > "$T/diffs"
+sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/diffs" > "$T/c" 2>&1 || fail "a declared difference must excuse its root: $(cat "$T/c")"
+printf 'trust %s the wrong kind\n' "$OLD" > "$T/diffs"
+rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/diffs" > "$T/c" 2>&1 || rc=$?
+[ "$rc" -eq 1 ] || fail "a 'trust' difference must not excuse a root AquaTransport distrusts, exited $rc"
+grep -q "AquaTransport distrusts $OLD" "$T/c" || fail "a 'trust' difference must leave the distrusted root unexcused: $(cat "$T/c")"
+printf 'distrust %s\n' "$OLD" > "$T/diffs"
+rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/diffs" > "$T/c" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "a declared difference with no reason must fail"
+grep -q "reason" "$T/c" || fail "a difference with no reason must say so: $(cat "$T/c")"
+
+scenario "a declared difference that excuses nothing fails, so none outlives its reason"
+cp "$T/s/distrust/Old Root.pem" "$T/ours/distrust/$OLD.pem"
+printf 'distrust %s we leave it alone for a reason\n' "$OLD" > "$T/diffs"
+rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/diffs" > "$T/c" 2>&1 || rc=$?
+[ "$rc" -eq 1 ] || fail "a difference for a root we now distrust too must fail, exited $rc"
+grep -q "$OLD" "$T/c" || fail "a stale difference must name its root: $(cat "$T/c")"
+
+scenario "a declared difference never excuses a contradiction"
+mv "$T/ours/distrust/$OLD.pem" "$T/ours/trusted/$OLD.pem"
+rc=0; sh "$C" "$T/out" "$T/ours/trusted" "$T/ours/distrust" "$T/diffs" > "$T/c" 2>&1 || rc=$?
+[ "$rc" -eq 1 ] || fail "a difference must not excuse AquaTransport distrusting a root we trust, exited $rc"
+
+scenario "the committed differences each name a root and give a reason"
+Df="$R/aquatransport-differences.txt"
+[ -f "$Df" ] || fail "aquatransport-differences.txt is missing"
+bad="$(awk '!/^#/ && NF && !(($1 == "trust" || $1 == "distrust") && $2 ~ /^[0-9A-F]+$/ && length($2) == 40 && NF >= 3) { print NR ": " $0 }' "$Df")"
+[ -z "$bad" ] || fail "aquatransport-differences.txt has lines that are neither a comment nor 'trust|distrust SHA1 reason':
+$bad"
 
 scenario "the watcher compares the live download with the committed list, daily"
 Wf="$R/.github/workflows/aquatransport-roots.yml"

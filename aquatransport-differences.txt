@@ -1,0 +1,4 @@
+# Roots AquaTransport's "Modern Root Certificates" component trusts or distrusts and we don't, each
+# with why we differ. build/aquatransport-conflicts.sh refuses any other difference, and any line
+# here that no longer differs. docs/TRUST-POLICY.md #12 says why its choices should be a subset of ours.
+distrust D1EB23A46D17D68FD92564C2F1F1601764D8E349 AAA Certificate Services: Mozilla dropped it for websites for age, not cause, so withdrawn.md (#5) leaves 10.9's trust alone; 10.9's own TLS code may still need it for Sectigo's older cross-signed chains, which AquaTransport's OpenSSL bypasses
