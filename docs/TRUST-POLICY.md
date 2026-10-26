@@ -287,10 +287,10 @@ component is already installed is one the component chose not to make, so it sta
 `aquatransport-roots.txt`, read from the AquaTransport download.
 
 **Why:** that component never undoes its settings, even when AquaTransport is uninstalled. It
-skips a root that's already in the System keychain, and denies its 7 roots for every use, replacing
+skips a root that's already in the System keychain, and denies its 8 roots for every use, replacing
 any setting already there. So when it's installed *after* ca-certs, it leaves no trace for the roots
 we'd already added. Without this rule, uninstalling ca-certs would take away the trust it meant to
-add (Let's Encrypt, Amazon, Google and others) and its 7 denials. Installed *before* ca-certs, its
+add (Let's Encrypt, Amazon, Google and others) and its 8 denials. Installed *before* ca-certs, its
 settings already exist, and #8 leaves them alone.
 
 **Instead of:**
@@ -310,8 +310,9 @@ added is left alone even if your older one never set it.
 A daily check (`aquatransport-roots.yml`) compares the download's list with ours and fails when they
 differ. A person then regenerates the file with `build/aquatransport-roots.sh`, reads the change and
 commits it, which cuts a release. The build refuses to ship if AquaTransport trusts a root we
-distrust, or the other way round. Today the two lists agree: its 14 trusted roots are all among
-ours, and its 7 distrusted roots are all in `withdrawn.md`.
+distrust, or the other way round. Today the two lists agree: its 15 trusted roots are all among
+ours, and of its 8 distrusted roots, 7 are in `withdrawn.md` and the eighth, AAA Certificate
+Services, Mozilla trusts only for email, so our bundle never held it.
 
 **Reconsider when:** AquaTransport records its own claims somewhere we can read, or stops shipping
 its root component.
