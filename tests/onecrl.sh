@@ -86,7 +86,8 @@ write('nopem.csv', [h for h in ALL if h != 'PEM Info'], [])
 bad = dict(row('W', 'Sub W', 'Test Org', '2030 Jan 01'), **{'SHA-256 Fingerprint': 'AB' * 32, 'Certificate Subject Common Name': 'Sub Garbled',
                                                          'PEM Info': "'-----BEGIN CERTIFICATE-----\nMIIBAgMEBQ==\n-----END CERTIFICATE-----'"})
 gone = dict(row('W', 'Sub W', 'Test Org', '2030 Jan 01'), **{'SHA-256 Fingerprint': 'CD' * 32, 'Certificate Subject Common Name': 'Sub Pemless', 'PEM Info': ''})
-write('unreadable.csv', ALL, [bad, gone, bad])
+blank = lambda cn: dict(row('W', 'Sub W', 'Test Org', '2030 Jan 01'), **{'SHA-256 Fingerprint': '', 'Certificate Subject Common Name': cn, 'PEM Info': ''})
+write('unreadable.csv', ALL, [bad, gone, bad, blank('Sub Blank One'), blank('Sub Blank Two')])
 EOF
 # spec: build/onecrl.py -- 988 fillers plus 11 records is 999, one short of the guard
 python3 -I "$T/fixture.py" "$T" 988 >/dev/null
@@ -133,8 +134,8 @@ grep -q "^| Pipe/Org, signed by Test Root | \`$S256_Y\` | \[2222\](https://bugzi
 grep -q "^| Sub V3, signed by Test Root | \`$S256_V3\` | \[6003\](https://bugzilla.mozilla.org/show_bug.cgi?id=6003) | 2029 |\$" "$M" || fail "V3's row must cite bug 6003"
 grep -q "^| Sub V4, signed by Test Org | \`$S256_V4\` | " "$M" || fail "V4's issuer has no CN in CCADB, so its row must name the issuer's O"
 grep -q '^| Intermediate | SHA-256 | Bug | Expires |$' "$M" || fail "blocked.md's table header is not | Intermediate | SHA-256 | Bug | Expires |"
-grep -q 'build/onecrl.sh' "$M" && grep -q "$NOW" "$M" && grep -q '2026-10-21' "$M" \
-  || fail "blocked.md must say build/onecrl.sh generated it, from OneCRL as of 2026-10-21, on $NOW"
+grep -q 'build/onecrl.sh' "$M" || fail "blocked.md must say build/onecrl.sh generated it"
+! grep -q "$NOW\|2026-10-21" "$M" "$E" || fail "blocked.md and blocked.entries must not carry the run date or OneCRL's last_modified: the bot would propose a change every day"
 
 scenario "spells out a bare-number bug"
 grep -q "^| Sub V5, signed by Test Root | \`$S256_V5\` | \[6005\](https://bugzilla.mozilla.org/show_bug.cgi?id=6005) | 2029 |\$" "$M" \
@@ -157,6 +158,22 @@ diff -r "$T/before" "$T/repo" || fail "a second run on the same input changed th
 mkdir "$T/repo2"
 gen "$T/repo2" >/dev/null 2>&1 || fail "a run into a fresh directory failed"
 diff -r "$T/before" "$T/repo2" || fail "two runs into fresh directories differ"
+
+scenario "changes only when the data does"
+mkdir "$T/later"
+python3 -I "$G" --onecrl "$T/onecrl.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --now 2026-10-29 --repo "$T/later" >/dev/null 2>&1 \
+  || fail "a run a day later failed"
+diff -r "$T/before" "$T/later" || fail "a run a day later, with nothing expiring and no gap entry aging out, changed the output"
+python3 -I - "$T/onecrl.json" "$T/touched.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for r in d['data']: r['last_modified'] += 86400000
+json.dump(d, open(sys.argv[2], 'w'))
+PY
+mkdir "$T/touched"
+python3 -I "$G" --onecrl "$T/touched.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --now "$NOW" --repo "$T/touched" >/dev/null 2>&1 \
+  || fail "a run on a re-stamped OneCRL failed"
+diff -r "$T/before" "$T/touched" || fail "OneCRL's last_modified alone changed the output"
 
 scenario "guards"
 refuses() {  # REPO WHY ARG...: the generator exits 1 naming WHY and leaves REPO as it was
@@ -182,10 +199,12 @@ mkdir "$T/unread"
 python3 -I "$G" --onecrl "$T/onecrl.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --ccadb "$T/unreadable.csv" \
   --now "$NOW" --repo "$T/unread" > "$T/out" 2>&1 || fail "a CCADB row with no PEM, or a PEM that does not parse, failed the run: $(cat "$T/out")"
 U="$T/unread/blocked.md"
-grep -q '\*\*2 CCADB rows\*\*' "$U" || fail "blocked.md must count the 2 CCADB rows it could not read, once each:
+grep -q '\*\*4 CCADB rows\*\*' "$U" || fail "blocked.md must count the 4 CCADB rows it could not read, once each, two blank SHA-256s apart:
 $(cat "$U")"
 grep -q "^| \`ABABABAB[0-9A-F]*\` | Sub Garbled |\$" "$U" || fail "blocked.md must name the row whose PEM does not parse by SHA-256 and subject"
 grep -q "^| \`CDCDCDCD[0-9A-F]*\` | Sub Pemless |\$" "$U" || fail "blocked.md must name the row with no PEM by SHA-256 and subject"
+grep -q '^| `` | Sub Blank One |$' "$U" && grep -q '^| `` | Sub Blank Two |$' "$U" \
+  || fail "two CCADB rows with no SHA-256 must both be named, not merged into one"
 grep -q '\*\*0 CCADB rows\*\*' "$M" || fail "blocked.md from readable input must still say how many CCADB rows it could not read"
 
 scenario "names bad input instead of a traceback"
