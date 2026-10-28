@@ -526,6 +526,33 @@ apply 2>/dev/null || fail "the next clean run must finish the job"
 [ "$(grep -c '^blocked ' "$VAR/receipt")" = 3 ] || fail "every blocked intermediate must be recorded: $(cat "$VAR/receipt")"
 claims_hold
 
+scenario "a failed retiring import leaves no false claims, and keeps the lines of keys still set"
+fresh
+BS="$(mkblocked bs)"; BT="$(mkblocked bt)"; BU="$(mkblocked bu)"
+apply 2>/dev/null || fail "apply failed"
+"$SECURITY" remove-trusted-cert -d "$TREE/share/ca-certs/blocked/$BU.pem"
+unship "$BT"; unship "$BU"
+if apply FAKE_SEC_FAIL_IMPORT=1 2>"$T/err"; then fail "a failed retiring import must fail the apply"; fi
+grep -q 'could not' "$T/err" || fail "the failure must explain what happened: $(cat "$T/err")"
+claims_hold
+has "blocked $BT"; lacks "blocked $BU"; has "blocked $BS"
+denied_ssl "$BT"; denied_ssl "$BS"
+apply 2>/dev/null || fail "the next clean run must finish retiring BT"
+absent "$BT"; lacks "blocked $BT"; has "blocked $BS"
+
+scenario "a failed import that copies an existing denial drops every new line and keeps the earlier ones"
+fresh
+BV="$(mkblocked bv)"
+apply 2>/dev/null || fail "apply failed"
+BW="$(mkblocked bw)"; BX="$(mkblocked bx)"
+: > "$SEC/log"
+if apply FAKE_SEC_FAIL_IMPORT=1 2>"$T/err"; then fail "a failed import must fail the apply"; fi
+[ "$(calls add-trusted-cert)" = 0 ] || fail "BV's denial is there to copy; nothing may be added on its own: $(cat "$SEC/log")"
+lacks "blocked $BW"; lacks "blocked $BX"; has "blocked $BV"
+claims_hold
+apply 2>/dev/null || fail "the next clean run must add BW and BX"
+has "blocked $BW"; has "blocked $BX"; denied_ssl "$BW"; denied_ssl "$BX"
+
 scenario "batch into an empty admin domain"
 fresh
 BQ="$(mkblocked bq)"; BR="$(mkblocked br)"

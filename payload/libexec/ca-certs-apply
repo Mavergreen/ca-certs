@@ -93,13 +93,21 @@ sift in "$work/denied" "$work/shipped" > "$work/migrate"
 
 # spec: docs/TRUST-POLICY.md #8 and #9 -- a blocked intermediate this release no longer ships loses
 #       the setting we made, all in one removal; one the user already removed is only forgotten.
-#       Each line goes once a fresh export shows its setting gone, and so does any import .3 made
+#       Each line goes once a fresh export shows its setting gone, and so does any import .3 made;
+#       the run fails after that check if a key remains, whether the import did or not
 ca_receipt_list blocked > "$work/ours"
 sift out "$work/ours" "$work/shipped" > "$work/gone"
 if [ -s "$work/gone" ]; then
   admin_to
   sift in "$work/gone" "$work/admin" > "$work/remove"
-  [ ! -s "$work/remove" ] || ca_admin_batch remove "$work/remove"
+  remove_rc=0
+  if [ -s "$work/remove" ]; then
+    # ca_admin_batch dies on any failure; the subshell keeps this run to check what it left behind
+    set +e
+    (set -e; ca_admin_batch remove "$work/remove")
+    remove_rc=$?
+    set -e
+  fi
   admin_to
   sift out "$work/gone" "$work/admin" > "$work/removed"
   sift in "$work/gone" "$work/admin" > "$work/stuck"
@@ -107,7 +115,8 @@ if [ -s "$work/gone" ]; then
   ca_receipt_list imported > "$work/imported"
   unimport="$(sift in "$work/removed" "$work/imported")"
   for sha in $unimport; do ca_undo_import "$sha"; ca_receipt_drop imported "$sha"; done
-  [ ! -s "$work/stuck" ] || ca_die "security reported removing $(count "$work/stuck") blocked intermediates but their admin settings remain"
+  [ ! -s "$work/stuck" ] || ca_die "could not remove $(count "$work/stuck") blocked intermediates' admin settings"
+  [ "$remove_rc" -eq 0 ] || ca_die "could not remove the blocked intermediates' admin settings"
 fi
 
 # spec: docs/TRUST-POLICY.md #9 -- reconcile the receipt against the trust store on every run, with
