@@ -46,6 +46,8 @@ for list in withdrawn blocked; do
     [ -f "$f" ] || build_die "$list.md lists $name ($s256) but $list/$s256.pem is missing"
     s1="$(ca_fingerprint sha1 "$f")" || build_die "$f does not parse"
     [ ! -f "$D/trusted/$s1.pem" ] || build_die "$name is trusted by Mozilla and listed in $list.md"
+    # spec: docs/TRUST-POLICY.md #5 and #14 -- withdrawn roots and blocked intermediates are applied and recorded apart, so one certificate can't be both
+    [ "$list" != blocked ] || [ ! -f "$D/distrust/$s1.pem" ] || build_die "$name is listed in both withdrawn.md and blocked.md"
     cp "$f" "$D/$dest/$s1.pem"
     printf '%s %s %s\n' "$kind" "$s256" "$name" >> "$D/roots.unsorted"
     [ "$list" != blocked ] || printf '%s %s\n' "$s256" "$s1" >> "$D/blocked.sha1s"
@@ -62,7 +64,7 @@ awk 'NR == FNR { sha1[$1] = $2; next }
 sort "$D/blocked.unsorted" > "$D/blocked.entries"
 sort "$D/roots.unsorted" > "$D/roots.txt"
 cp "$MAVERICKS_ROOT/aquatransport-roots.txt" "$D/aquatransport-roots.txt"
-sh "$MAVERICKS_ROOT/build/aquatransport-conflicts.sh" "$D/aquatransport-roots.txt" "$D/trusted" "$D/distrust" \
+sh "$MAVERICKS_ROOT/build/aquatransport-conflicts.sh" "$D/aquatransport-roots.txt" "$D/trusted" "$D/distrust" "$D/blocked" \
   "$MAVERICKS_ROOT/aquatransport-differences.txt" \
   || build_die "AquaTransport's root list disagrees with this release (above)"
 rm -rf "$D/split" "$D/roots.unsorted" "$D/withdrawn.rows" "$D/blocked.rows" "$D/blocked.sha1s" "$D/blocked.unsorted"

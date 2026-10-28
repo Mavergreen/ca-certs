@@ -6,6 +6,48 @@ R="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/cabundle.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 . "$R/tests/lib/assert.sh"
+
+# spec: build/build-bundle.sh -- its refusals, on a fixture tree: certdata is stubbed (a "# label" and a PEM, which
+#       the stubbed certdata-to-pem passes through), so this needs no download
+F="$T/root"
+mkdir -p "$F/build" "$F/withdrawn" "$F/blocked"
+for f in build-bundle.sh lib.sh msc.sh aquatransport-conflicts.sh; do cp "$R/build/$f" "$F/build/"; done
+mkcert() {  # NAME: a self-signed certificate in $T/NAME.pem
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$T/key" -out "$T/$1.pem" -days 2 -subj "/CN=$1" >/dev/null 2>&1 || fail "openssl could not make $1"
+}
+fpr() { openssl x509 -noout -fingerprint "-$1" -in "$T/$2.pem" | sed 's/.*=//' | tr -d :; }
+for c in rootA withdrawnW blockedB; do mkcert "$c"; done
+printf '#!/bin/sh\n# platform: host-agnostic\n# spec: tests/bundle-sanity.sh -- a stub: the fixture root, as certdata-to-pem would print it\n{ echo "# Root A"; cat "%s"; } > "$1/certdata.txt"\n' "$T/rootA.pem" > "$F/build/fetch-certdata.sh"
+echo '{ print }' > "$F/build/certdata-to-pem.awk"
+W256="$(fpr sha256 withdrawnW)"; B256="$(fpr sha256 blockedB)"
+cp "$T/withdrawnW.pem" "$F/withdrawn/$W256.pem"; cp "$T/blockedB.pem" "$F/blocked/$B256.pem"
+printf '| Withdrawn W | `%s` | 2038 |\n' "$W256" > "$F/withdrawn.md"
+blocks() {  # NAME...: blocked.md, blocked/ and blocked.entries list exactly these fixture certificates
+  rm -rf "$F/blocked"; mkdir "$F/blocked"; : > "$F/blocked.md"; : > "$F/blocked.entries"
+  for _c in "$@"; do
+    _s="$(fpr sha256 "$_c")"; cp "$T/$_c.pem" "$F/blocked/$_s.pem"
+    printf '| %s | `%s` | [1](https://bugzilla.mozilla.org/show_bug.cgi?id=1) | 2030 |\n' "$_c" "$_s" >> "$F/blocked.md"
+    printf '%s %s ISSUER SERIAL\n' "$_s" "$(fpr sha1 "$_c")" >> "$F/blocked.entries"
+  done
+}
+at() { { echo "# AquaTransport fixture"; printf '%s\n' "$@"; } > "$F/aquatransport-roots.txt"; }
+echo '# none' > "$F/aquatransport-differences.txt"
+build() { _rc=0; MAVERICKS_ROOT="$F" MAVERICKS_BUILD_ROOT="$T/mbr" sh "$F/build/build-bundle.sh" > "$T/build.out" 2>&1 || _rc=$?; return "$_rc"; }
+
+scenario "build-bundle.sh builds the fixture tree"
+blocks blockedB; at "trust $(fpr sha1 rootA) Root A"
+build || fail "build-bundle.sh failed on the fixture tree: $(cat "$T/build.out")"
+
+scenario "build-bundle.sh refuses a certificate listed in both withdrawn.md and blocked.md"
+blocks blockedB withdrawnW
+! build || fail "build-bundle.sh must refuse a certificate both withdrawn and blocked"
+grep -q "withdrawnW is listed in both withdrawn.md and blocked.md" "$T/build.out" || fail "the refusal must name the certificate and both lists: $(cat "$T/build.out")"
+
+scenario "build-bundle.sh refuses a release whose blocked certificate AquaTransport trusts"
+blocks blockedB; at "trust $(fpr sha1 rootA) Root A" "trust $(fpr sha1 blockedB) Blocked B"
+! build || fail "build-bundle.sh must refuse when AquaTransport trusts a certificate we block"
+grep -q "AquaTransport trusts $(fpr sha1 blockedB) (Blocked B), which we block" "$T/build.out" || fail "the refusal must name the blocked certificate: $(cat "$T/build.out")"
+
 : "${MAVERICKS_BUILD_ROOT:=${TMPDIR:-/tmp}/mm-build}"
 D="$MAVERICKS_BUILD_ROOT/$(basename "$R")/data"
 [ -s "$D/ca-certificates.crt" ] || { echo "bundle-sanity: not built (sh build/build-bundle.sh) -- skipping"; exit 77; }
