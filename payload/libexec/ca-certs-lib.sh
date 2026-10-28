@@ -92,6 +92,30 @@ ca_receipt_set() {
   ca_receipt_with "$_k $*"
   ca_receipt_replace
 }
+# spec: docs/TRUST-POLICY.md #9 -- ca_receipt_bulk add|drop KIND FILE, or move KIND FILE NEWKIND:
+#       one rewrite for many lines, one SHA-1 per line of FILE, for the hundreds of blocked
+#       intermediates. The new receipt is worked out whole and written into .tmp by printf, as
+#       every other change is; move rewrites each line in place and never duplicates one
+ca_receipt_bulk() {
+  _rin="$CA_RECEIPT"; [ -f "$_rin" ] || _rin=/dev/null
+  _r="$(awk -v op="$1" -v k="$2" -v list="$3" -v to="${4:-}" '
+    BEGIN {
+      while ((_g = (getline l < list)) > 0) if (l != "" && !(l in want)) { want[l] = 1; order[++n] = l }
+      if (_g < 0) exit 2
+    }
+    NF == 2 && $1 == k && ($2 in want) {
+      if (op == "drop") next
+      if (op == "move") { if (!((to " " $2) in seen)) { seen[to " " $2] = 1; print to " " $2 }; next }
+      have[$2] = 1
+    }
+    op == "move" && NF == 2 { if ($0 in seen) next; seen[$0] = 1 }
+    { print }
+    END { if (op == "add") for (i = 1; i <= n; i++) if (!(order[i] in have)) print k " " order[i] }
+  ' "$_rin")" || ca_die "could not read $CA_RECEIPT"
+  rm -f "$CA_RECEIPT.tmp"
+  if [ -n "$_r" ]; then ca_receipt_with "$_r"; else : > "$CA_RECEIPT.tmp" || ca_receipt_abandon; fi
+  ca_receipt_replace
+}
 ca_receipt_list() {
   [ -f "$CA_RECEIPT" ] || return 0
   _l="$(sed -n "s/^$1 \([0-9A-F]\{40\}\)\$/\1/p" "$CA_RECEIPT")" || ca_die "could not read $CA_RECEIPT"
@@ -106,7 +130,8 @@ ca_receipt_changes() {
   _c="$(ca_receipt_list trusted)" || exit 1
   _d="$(ca_receipt_list denied)" || exit 1
   _i="$(ca_receipt_list imported)" || exit 1
-  [ -n "$_c$_d$_i" ]
+  _b="$(ca_receipt_list blocked)" || exit 1
+  [ -n "$_c$_d$_i$_b" ]
 }
 
 # spec: docs/TRUST-POLICY.md #8 -- a trust setting that already exists (here: already gone) is never

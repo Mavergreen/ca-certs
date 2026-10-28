@@ -2,11 +2,12 @@
 # platform: macOS-only -- changes admin trust through /usr/bin/security
 #   usage: ca-certs-apply --root VOLUME
 #          Brings VOLUME's admin trust settings to this release: trusts every root in
-#          share/ca-certs/trusted, distrusts every root in share/ca-certs/distrust for TLS, undoes
-#          what an earlier release did that this one no longer asks for, and records each change in
-#          var/ca-certs/receipt as it happens. Only on the running system of a Mac OS X 10.x install;
-#          elsewhere it records that it changed nothing. On the running system of any macOS, it then
-#          rebuilds the bundle without the roots the admin trust settings deny for TLS.
+#          share/ca-certs/trusted, distrusts every root in share/ca-certs/distrust and every
+#          intermediate in share/ca-certs/blocked for TLS, undoes what an earlier release did that
+#          this one no longer asks for, and records each change in var/ca-certs/receipt as it
+#          happens. Only on the running system of a Mac OS X 10.x install; elsewhere it records
+#          that it changed nothing. On the running system of any macOS, it then rebuilds the bundle
+#          without the roots the admin trust settings deny for TLS.
 # spec: tests/apply.sh
 set -eu
 [ "${1:-}" = --root ] && [ -n "${2:-}" ] || { echo "usage: ca-certs-apply --root VOLUME" >&2; exit 2; }
@@ -59,6 +60,55 @@ fi
 ca_receipt_set nss "$nss"
 ca_receipt_set keychain yes
 ca_cede_to_aquatransport
+
+# spec: docs/TRUST-POLICY.md #14 -- what this release blocks is blocked.entries, which the build makes
+#       from the same rows as blocked/. There are hundreds, so their admin settings change in one
+#       batch import each way, read through one export before and one after, never a security call
+#       or a receipt rewrite per certificate. Set arithmetic is on files of SHA-1s, one per line
+work="$(mktemp -d "${TMPDIR:-/tmp}/ca-certs-apply.XXXXXX")" || ca_die "could not make a temporary directory"
+trap 'rm -rf "$work"' EXIT
+entries="$CA_TREE/share/ca-certs/blocked.entries"
+if [ -f "$entries" ]; then
+  awk 'NF' "$entries" > "$work/entries" || ca_die "could not read $entries"
+else
+  : > "$work/entries"
+fi
+awk '{ print $1 }' "$work/entries" > "$work/shipped" || ca_die "could not read $entries"
+# the lines of FILE whose first field is (in) or is not (out) one of the lines of SET
+sift() {
+  awk -v mode="$1" -v set="$3" '
+    BEGIN { while ((g = (getline l < set)) > 0) s[l] = 1; if (g < 0) exit 2 }
+    NF { if ((($1 in s) ? "in" : "out") == mode) print }
+  ' "$2" || ca_die "could not compare $2 with $3"
+}
+admin_to() { admin="$(ca_admin_keys)"; printf '%s\n' "$admin" > "$work/admin"; }
+count() { awk 'END { print NR }' "$1" || ca_die "could not read $1"; }
+
+# spec: docs/TRUST-POLICY.md #9 and #14 -- a withdrawn root an earlier release denied that now ships
+#       as blocked keeps the setting it has: its denied line becomes a blocked line in place, so the
+#       denied loop below never undoes it, and its imported line stays for uninstall to delete
+ca_receipt_list denied > "$work/denied"
+sift in "$work/denied" "$work/shipped" > "$work/migrate"
+[ ! -s "$work/migrate" ] || ca_receipt_bulk move denied "$work/migrate" blocked
+
+# spec: docs/TRUST-POLICY.md #8 and #9 -- a blocked intermediate this release no longer ships loses
+#       the setting we made, all in one removal; one the user already removed is only forgotten.
+#       Each line goes once a fresh export shows its setting gone, and so does any import .3 made
+ca_receipt_list blocked > "$work/ours"
+sift out "$work/ours" "$work/shipped" > "$work/gone"
+if [ -s "$work/gone" ]; then
+  admin_to
+  sift in "$work/gone" "$work/admin" > "$work/remove"
+  [ ! -s "$work/remove" ] || ca_admin_batch remove "$work/remove"
+  admin_to
+  sift out "$work/gone" "$work/admin" > "$work/removed"
+  sift in "$work/gone" "$work/admin" > "$work/stuck"
+  [ ! -s "$work/removed" ] || ca_receipt_bulk drop blocked "$work/removed"
+  ca_receipt_list imported > "$work/imported"
+  unimport="$(sift in "$work/removed" "$work/imported")"
+  for sha in $unimport; do ca_undo_import "$sha"; ca_receipt_drop imported "$sha"; done
+  [ ! -s "$work/stuck" ] || ca_die "security reported removing $(count "$work/stuck") blocked intermediates but their admin settings remain"
+fi
 
 # spec: docs/TRUST-POLICY.md #9 -- reconcile the receipt against the trust store on every run, with
 #       plain assignments that die before anything changes if either listing itself fails, so a
@@ -141,6 +191,41 @@ for kind in trusted denied; do
     fi
   done
 done
+
+# spec: docs/TRUST-POLICY.md #8, #9 and #14 -- every shipped blocked intermediate with no admin
+#       setting is distrusted for TLS in one batch: one we recorded is re-applied, one with a setting
+#       we didn't make is preexisting and left alone. Each line is written before the import; a line
+#       whose key the export after it lacks is dropped and the run fails, whether the import did or not
+admin_to
+ca_receipt_list blocked > "$work/ours"
+ca_receipt_list preexisting > "$work/pre"
+sift in "$work/shipped" "$work/admin" > "$work/present"
+sift out "$work/present" "$work/ours" > "$work/notours"
+sift out "$work/notours" "$work/pre" > "$work/newpre"
+sift in "$work/shipped" "$work/pre" > "$work/kept"
+cat "$work/newpre" >> "$work/kept" || ca_die "could not count the blocked intermediates left alone"
+[ ! -s "$work/newpre" ] || ca_receipt_bulk add preexisting "$work/newpre"
+sift out "$work/entries" "$work/admin" > "$work/absent"
+sift out "$work/absent" "$work/pre" > "$work/add"
+awk '{ print $1 }' "$work/add" > "$work/addsha" || ca_die "could not list the blocked intermediates to add"
+[ ! -s "$work/addsha" ] || ca_receipt_bulk add blocked "$work/addsha"
+batch_rc=0
+if [ -s "$work/add" ]; then
+  # ca_admin_batch dies on any failure; the subshell keeps this run to check what it left behind
+  set +e
+  (set -e; ca_admin_batch add "$work/add")
+  batch_rc=$?
+  set -e
+fi
+admin_to
+ca_receipt_list blocked > "$work/ours"
+sift out "$work/ours" "$work/admin" > "$work/missing"
+if [ -s "$work/missing" ]; then
+  ca_receipt_bulk drop blocked "$work/missing"
+  ca_die "could not distrust $(count "$work/missing") blocked intermediates"
+fi
+[ "$batch_rc" -eq 0 ] || ca_die "could not distrust the blocked intermediates"
+added=$((added + $(count "$work/add"))); kept=$((kept + $(count "$work/kept")))
 ca_note_aquatransport
 ca_filter_bundle
 ca_receipt_set applied "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

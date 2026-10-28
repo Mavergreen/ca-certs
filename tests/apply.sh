@@ -1,6 +1,6 @@
 #!/bin/sh
 # platform: macOS-only -- the applier uses BSD stat and plutil, as the 10.9 install does
-# spec: docs/TRUST-POLICY.md #4, #6, #7, #8 and #9
+# spec: docs/TRUST-POLICY.md #4, #6, #7, #8, #9 and #14
 set -eu
 R="$(cd "$(dirname "$0")/.." && pwd)"
 . "$R/tests/lib/assert.sh"
@@ -17,12 +17,12 @@ mkcert() {
 fresh() {
   n=$((n + 1)); ROOT="$T/root$n"; SEC="$T/sec$n"
   TREE="$ROOT/usr/local/mavergreen/ca-certs"; VAR="$ROOT/usr/local/mavergreen/var/ca-certs"
-  mkdir -p "$TREE/libexec/mavergreen" "$TREE/share/ca-certs/trusted" "$TREE/share/ca-certs/distrust" "$SEC" "$ROOT/Library/Keychains"
+  mkdir -p "$TREE/libexec/mavergreen" "$TREE/share/ca-certs/trusted" "$TREE/share/ca-certs/distrust" "$TREE/share/ca-certs/blocked" "$SEC" "$ROOT/Library/Keychains"
   cp "$R/payload/libexec/ca-certs-apply" "$R/payload/libexec/ca-certs-lib.sh" "$TREE/libexec/"
   cp "$R/payload/libexec/mavergreen/pre-uninstall" "$TREE/libexec/mavergreen/" 2>/dev/null || :
   echo 3.130.0 > "$TREE/share/ca-certs/nss-version"
   export FAKE_SEC_STATE="$SEC" FAKE_SEC_ROOT="$ROOT" CA_CERTS_BOOTED_ROOT="$ROOT" CA_CERTS_OS_VERSION=10.9.5
-  unset FAKE_SEC_SILENT_ADD FAKE_SEC_FAIL_REMOVE
+  unset FAKE_SEC_SILENT_ADD FAKE_SEC_FAIL_REMOVE FAKE_SEC_FAIL_IMPORT
 }
 apply() { env "$@" sh "$TREE/libexec/ca-certs-apply" --root "$ROOT"; }
 has() { grep -q "^$1\$" "$VAR/receipt" || fail "receipt lacks '$1':
@@ -419,6 +419,126 @@ echo reinstalled > "$ROOT/private/var/db/receipts/Wowfunhappy.AquaTransport.Mode
 apply 2>/dev/null || fail "the run after AquaTransport's reinstall failed"
 lacks "trusted $A"; lacks "imported $A"; has "preexisting $A"
 if grep -q -E '^(add-trusted-cert|remove-trusted-cert|delete-certificate)' "$SEC/log"; then fail "handing roots over changes no setting: $(cat "$SEC/log")"; fi
+
+# spec: docs/TRUST-POLICY.md #14 -- a blocked intermediate, as the pkg ships it: its PEM in
+#       share/ca-certs/blocked and its line in blocked.entries, with a made-up issuer and serial
+entry() { printf '%s %s %s\n' "$1" "$(printf 'issuer-%s' "$1" | base64)" "$(printf 'serial-%s' "$1" | base64)" >> "$TREE/share/ca-certs/blocked.entries"; }
+mkblocked() { _m="$(mkcert "$1" "$TREE/share/ca-certs/blocked")"; entry "$_m"; printf '%s\n' "$_m"; }
+unship() { rm "$TREE/share/ca-certs/blocked/$1.pem"; grep -v "^$1 " "$TREE/share/ca-certs/blocked.entries" > "$T/entries" || :; mv "$T/entries" "$TREE/share/ca-certs/blocked.entries"; }
+denied_ssl() { grep -q "^$1 deny ssl\$" "$SEC/admin" || fail "$1 must be denied for TLS: $(cat "$SEC/admin")"; }
+absent() { if grep -q "^$1 " "$SEC/admin"; then fail "$1 must have no admin setting: $(cat "$SEC/admin")"; fi; }
+calls() { grep -c "^$1" "$SEC/log" || :; }
+claims_hold() {  # every blocked line names a key the admin domain really has
+  for _c in $(sed -n 's/^blocked //p' "$VAR/receipt"); do
+    grep -q "^$_c " "$SEC/admin" || fail "the receipt claims $_c is blocked but it has no admin setting: $(cat "$SEC/admin")"
+  done
+}
+
+scenario "blocks every shipped intermediate in one import"
+fresh
+BA="$(mkblocked ba)"; BB="$(mkblocked bb)"; BC="$(mkblocked bc)"
+: > "$SEC/log"
+apply 2>/dev/null || fail "apply failed"
+has "blocked $BA"; has "blocked $BB"; has "blocked $BC"
+denied_ssl "$BA"; denied_ssl "$BB"; denied_ssl "$BC"
+[ "$(calls trust-settings-import)" = 1 ] || fail "every blocked intermediate must go in one import: $(cat "$SEC/log")"
+if grep -q '^imported ' "$VAR/receipt"; then fail "blocked intermediates are never imported: $(cat "$VAR/receipt")"; fi
+[ ! -s "$SEC/keychain" ] || fail "blocked intermediates are never imported into System.keychain: $(cat "$SEC/keychain")"
+
+scenario "the summary counts the blocked intermediates it added"
+fresh
+mkblocked bd >/dev/null; mkblocked be >/dev/null
+apply 2>"$T/err" || fail "apply failed"
+grep -q 'ca-certs: 2 trust settings added' "$T/err" || fail "the summary must count the blocked intermediates: $(cat "$T/err")"
+
+scenario "blocked intermediates: a second run imports nothing and adds nothing"
+fresh
+mkblocked bf >/dev/null; mkblocked bg >/dev/null
+apply 2>/dev/null || fail "apply failed"
+: > "$SEC/log"
+apply 2>/dev/null || fail "the second apply failed"
+[ "$(calls trust-settings-import)" = 0 ] || fail "a re-run must import nothing: $(cat "$SEC/log")"
+[ "$(calls add-trusted-cert)" = 0 ] || fail "a re-run must add nothing: $(cat "$SEC/log")"
+
+scenario "a blocked intermediate that already has an admin setting is preexisting"
+fresh
+BH="$(mkblocked bh)"; BI="$(mkblocked bi)"
+"$SECURITY" add-trusted-cert -d -r deny "$TREE/share/ca-certs/blocked/$BH.pem"
+apply 2>/dev/null || fail "apply failed"
+has "preexisting $BH"; lacks "blocked $BH"; has "blocked $BI"
+grep -q "^$BH deny \$" "$SEC/admin" || fail "the existing setting must stay exactly as it was: $(cat "$SEC/admin")"
+denied_ssl "$BI"
+
+scenario "a blocked setting removed by hand is re-applied, and only it"
+fresh
+BJ="$(mkblocked bj)"; BK="$(mkblocked bk)"; BL="$(mkblocked bl)"
+apply 2>/dev/null || fail "apply failed"
+"$SECURITY" remove-trusted-cert -d "$TREE/share/ca-certs/blocked/$BK.pem"
+cp "$SEC/admin" "$T/admin-before"
+: > "$SEC/log"
+apply 2>/dev/null || fail "the re-applying run failed"
+denied_ssl "$BK"; has "blocked $BK"
+[ "$(sort "$SEC/admin")" = "$( (cat "$T/admin-before"; echo "$BK deny ssl") | sort)" ] || fail "only BK may come back: $(cat "$SEC/admin")"
+[ "$(calls trust-settings-import)" = 1 ] || fail "BK must come back in one import: $(cat "$SEC/log")"
+
+scenario "retires what a release stops shipping"
+unship "$BK"
+apply 2>/dev/null || fail "the retiring run failed"
+absent "$BK"; lacks "blocked $BK"
+denied_ssl "$BJ"; denied_ssl "$BL"; has "blocked $BJ"; has "blocked $BL"
+
+scenario "a retired blocked intermediate the user already removed is just forgotten"
+"$SECURITY" remove-trusted-cert -d "$TREE/share/ca-certs/blocked/$BL.pem"
+unship "$BL"
+: > "$SEC/log"
+apply 2>/dev/null || fail "the run failed"
+lacks "blocked $BL"; has "blocked $BJ"
+[ "$(calls trust-settings-import)" = 0 ] || fail "nothing was left to remove: $(cat "$SEC/log")"
+
+scenario "upgrade from a .3 receipt: a denied root that now ships as blocked is kept, and becomes blocked"
+fresh
+BE="$(mkcert be "$TREE/share/ca-certs/distrust")"
+apply 2>/dev/null || fail "the .3-shaped apply failed"
+has "denied $BE"; has "imported $BE"; denied_ssl "$BE"
+mv "$TREE/share/ca-certs/distrust/$BE.pem" "$TREE/share/ca-certs/blocked/"; entry "$BE"
+BM="$(mkblocked bm)"
+: > "$SEC/log"
+apply 2>/dev/null || fail "the upgrading apply failed"
+has "blocked $BE"; has "imported $BE"; lacks "denied $BE"; has "blocked $BM"
+denied_ssl "$BE"; denied_ssl "$BM"
+grep -q "^$BE\$" "$SEC/keychain" || fail "the certificate .3 imported stays until uninstall: $(cat "$SEC/keychain")"
+if grep -q '^remove-trusted-cert' "$SEC/log"; then fail "an upgrade must not remove BE's setting: $(cat "$SEC/log")"; fi
+
+scenario "a migrated blocked intermediate a later release drops loses its setting and its import"
+unship "$BE"
+apply 2>/dev/null || fail "the retiring run failed"
+absent "$BE"; lacks "blocked $BE"; lacks "imported $BE"
+if grep -q "^$BE\$" "$SEC/keychain"; then fail "the certificate .3 imported for BE must be deleted: $(cat "$SEC/keychain")"; fi
+denied_ssl "$BM"
+
+scenario "a failed import leaves no false claims"
+fresh
+mkblocked bn >/dev/null; mkblocked bo >/dev/null; mkblocked bp >/dev/null
+if apply FAKE_SEC_FAIL_IMPORT=1 2>"$T/err"; then fail "a failed import must fail the apply"; fi
+grep -q 'could not' "$T/err" || fail "the failure must explain what happened: $(cat "$T/err")"
+claims_hold
+apply 2>/dev/null || fail "the next clean run must finish the job"
+[ "$(grep -c '^blocked ' "$VAR/receipt")" = 3 ] || fail "every blocked intermediate must be recorded: $(cat "$VAR/receipt")"
+claims_hold
+
+scenario "batch into an empty admin domain"
+fresh
+BQ="$(mkblocked bq)"; BR="$(mkblocked br)"
+[ ! -f "$ROOT/Library/Security/Trust Settings/Admin.plist" ] || fail "the domain must start empty"
+apply 2>/dev/null || fail "apply into an empty admin domain failed"
+has "backup none"; has "blocked $BQ"; has "blocked $BR"
+denied_ssl "$BQ"; denied_ssl "$BR"
+[ ! -s "$SEC/keychain" ] || fail "blocked intermediates are never imported: $(cat "$SEC/keychain")"
+
+scenario "not the running system: recorded blocked intermediates count as changes"
+cp "$VAR/receipt" "$T/before"
+apply CA_CERTS_OS_VERSION=11.7.10 2>/dev/null || fail "apply on 11 failed"
+cmp -s "$T/before" "$VAR/receipt" || fail "the record of blocked intermediates must survive untouched"
 
 mkbundle() {  # the bundle the pkg ships: share/ca-certs/ca-certificates.crt, its .sha1 index, and the contract copy
   _b="$TREE/share/ca-certs/ca-certificates.crt"; : > "$_b"; : > "$TREE/share/ca-certs/ca-certificates.sha1"
