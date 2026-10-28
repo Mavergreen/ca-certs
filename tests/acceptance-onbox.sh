@@ -98,7 +98,7 @@ check_bundle() {  # LABEL RELEASE: the contract bundle is the shipped one, less 
   bundle_sha1s "$TREE/etc/openssl/certs/ca-certificates.crt" > "$T/in"
   diff "$T/want-in" "$T/in" >&2 || fail "after the $1, the bundle is not the shipped one less the denied roots (diff above)"
 }
-check_blocked() {  # LABEL RELEASE: every shipped blocked intermediate is denied for TLS, with a setting and without a keychain home
+check_blocked() {  # LABEL RELEASE: every shipped blocked intermediate is denied for TLS, with a setting, and in a keychain only if the receipt records it imported
   _bd="$TREE/share/ca-certs/blocked"
   if ! ls "$_bd"/*.pem >/dev/null 2>&1; then
     [ "$2" = prev ] && return 0   # an older release ships no blocked set
@@ -114,13 +114,19 @@ check_blocked() {  # LABEL RELEASE: every shipped blocked intermediate is denied
   _first="$(ls "$_bd"/*.pem | head -1)"
   security verify-cert -c "$_first" -p ssl -L > "$T/blocked.verify" 2>&1 || :
   grep -q kSecTrustResultDeny "$T/blocked.verify" || fail "after the $1, $_first does not verify as kSecTrustResultDeny: $(cat "$T/blocked.verify")"
-  # spec: docs/TRUST-POLICY.md #14 -- the installer must not have imported any of them into System.keychain or the login/default keychain
+  # spec: docs/TRUST-POLICY.md #14 -- the installer must not import any of them into System.keychain or the login/default keychain
   { security find-certificate -a -Z /Library/Keychains/System.keychain 2>/dev/null || :; security find-certificate -a -Z 2>/dev/null || :; } \
     | sed -n 's/^SHA-1 hash: //p' | LC_ALL=C sort -u > "$T/blocked.kc"
   [ -s "$T/blocked.kc" ] || fail "after the $1, the keychain lookup listed no certificates at all (System.keychain always holds some), so it cannot show the blocked ones are absent"
-  comm -12 "$T/blocked.sha1" "$T/blocked.kc" > "$T/blocked.imported"
-  [ ! -s "$T/blocked.imported" ] || fail "after the $1, blocked intermediates are in a keychain, first: $(head -1 "$T/blocked.imported")"
-  echo "acceptance-onbox: after the $1: $(wc -l < "$T/blocked.sha1" | tr -d ' ') blocked intermediates denied for TLS, in the admin settings, in no keychain"
+  comm -12 "$T/blocked.sha1" "$T/blocked.kc" > "$T/blocked.inkc"
+  # spec: .superpowers/specs/2026-10-28-onecrl-feed-design.md section 4 "Migrating" -- 3.132.0-mavericks.3 imported the eMudhra ones into System.keychain and recorded them imported; they stay until uninstall, which the before/after keychain check below proves deletes them
+  sed -n 's/^imported //p' "$RECEIPT" | LC_ALL=C sort -u > "$T/blocked.receipt-imported"
+  comm -12 "$T/blocked.sha1" "$T/blocked.receipt-imported" > "$T/blocked.ours"
+  comm -23 "$T/blocked.inkc" "$T/blocked.ours" > "$T/blocked.stray"
+  [ ! -s "$T/blocked.stray" ] || fail "after the $1, $(wc -l < "$T/blocked.stray" | tr -d ' ') blocked intermediates are in a keychain without an imported line in the receipt, first: $(head -1 "$T/blocked.stray")"
+  comm -13 "$T/blocked.inkc" "$T/blocked.ours" > "$T/blocked.gone"
+  [ ! -s "$T/blocked.gone" ] || fail "after the $1, the receipt records $(wc -l < "$T/blocked.gone" | tr -d ' ') blocked intermediates imported that no keychain holds, first: $(head -1 "$T/blocked.gone")"
+  echo "acceptance-onbox: after the $1: $(wc -l < "$T/blocked.sha1" | tr -d ' ') blocked intermediates denied for TLS, in the admin settings, in a keychain only where the receipt records imported ($(wc -l < "$T/blocked.ours" | tr -d ' '))"
 }
 expect_installed() {  # LABEL RELEASE: with RELEASE installed, every root's verdict is what it asks for
   verdicts > "$T/$1.v"
