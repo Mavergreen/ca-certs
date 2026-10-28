@@ -44,6 +44,15 @@ printf '%s\n' "$gone" | grep -qx -- '- No longer blocks 3 (expired or unblocked)
 firstb="$(sh "$R/build/roots-notes.sh" "$T/cur3")"
 printf '%s\n' "$firstb" | grep -qx -- '- Trusts 2 roots, distrusts 1, and blocks 3 intermediates\.' || fail "a first release must count blocked: $firstb"
 
+# spec: docs/TRUST-POLICY.md #11 -- names come from CCADB, which the CA supplies, and Sparkle shows the notes as HTML on 10.9
+e=EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+f=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+{ cat "$T/cur0"; printf 'trusted %s Evil <b>Root</b> & Co\nblocked %s Sub <script>x</script> & Co, signed by A&B\n' "$e" "$f"; } > "$T/curx"
+evil="$(sh "$R/build/roots-notes.sh" "$T/curx" "$T/cur0")"
+! printf '%s\n' "$evil" | grep -q '[<>&]' || fail "a name's <, > and & must not reach the notes: $evil"
+printf '%s\n' "$evil" | grep -qx -- "- Newly trusted: Evil bRoot/b  Co (\`$e\`)" || fail "the newly trusted root must still be named, less <, > and &: $evil"
+printf '%s\n' "$evil" | grep -qx -- "- Newly blocked: Sub scriptx/script  Co, signed by AB (\`$f\`)" || fail "the newly blocked intermediate must still be named, less <, > and &: $evil"
+
 printf 'Some earlier notes.\n' > "$T/notes1"
 sh "$R/build/roots-notes.sh" --append "$T/notes1" "$T/cur" || fail "--append on a plain notes file failed"
 grep -q '^### Roots$' "$T/notes1" || fail "--append must write the section into the notes file"

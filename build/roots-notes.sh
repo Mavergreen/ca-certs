@@ -4,6 +4,7 @@
 #          Prints the release notes' "### Roots" section: roots newly trusted or distrusted, and
 #          no longer trusted or distrusted, since the previous release, and blocked intermediates
 #          as counts (named too when 20 or fewer changed). With no previous list, the counts.
+#          Names are printed without any <, > or &.
 #          Starts with a blank line, so it appends as its own paragraph. With --append NOTES,
 #          writes the section into NOTES instead, immediately before its first line that is
 #          exactly "---" (or at the end, if there is none), and refuses a missing or empty NOTES.
@@ -33,7 +34,9 @@ section() {
     printf -- '- No change to which roots are trusted or distrusted.\n'
     return 0
   fi
-  line() { grep "^$1 $2 " "$3" | head -n 1 | cut -d' ' -f3-; }
+  # spec: tests/roots-notes.sh -- names come from CCADB, which the CA supplies, and Sparkle shows the notes as HTML on 10.9:
+  #       <, > and & are dropped, not escaped, because shipyard's gen_appcast.sh escapes the notes itself
+  line() { grep "^$1 $2 " "$3" | head -n 1 | cut -d' ' -f3- | tr -d '<>&'; }
   group() {
     while read -r k s; do
       [ "$k" = "$1" ] || continue
