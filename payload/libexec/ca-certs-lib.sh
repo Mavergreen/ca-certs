@@ -227,3 +227,146 @@ ca_filter_bundle() {
   for _bo in $_was; do ca_in "$_bo" "$_out" || ca_receipt_drop bundle-omitted "$_bo"; done
   for _bo in $_out; do ca_receipt_has bundle-omitted "$_bo" || ca_receipt_add bundle-omitted "$_bo"; done
 }
+
+# spec: docs/TRUST-POLICY.md #8 -- reads trust-settings-export's XML (plutil xml1) on stdin and prints
+#       the first entry -- its key line through its whole nested <dict> -- whose one setting denies it
+#       for TLS and nothing else: result 3, the ssl policy, no policy string, no other restriction.
+#       That is the shape add-trusted-cert -d -r deny -p ssl writes, so copying it copies the OS's own.
+ca_admin_template() {
+  awk '
+    function keyof(s) { sub(/.*<key>/, "", s); sub(/<\/key>.*/, "", s); return s }
+    found { exit }
+    d == 2 && /<key>/ {
+      k = keyof($0)
+      if (k ~ /^[0-9A-F]+$/ && length(k) == 40) { cur = k; body = $0 "\n"; ok = 1; nsets = 0; iss = 0; ser = 0 }
+      next
+    }
+    cur == "" { if (/<dict>/) d++; else if (/<\/dict>/) d--; next }
+    { body = body $0 "\n" }
+    /<dict\/>/ { ok = 0; next }
+    /<dict>/ { d++; if (d == 4) { nsets++; pol = ""; res = ""; want = "" }; next }
+    /<\/dict>/ {
+      if (d == 4 && (res != "3" || pol != "KoZIhvdjZAED")) ok = 0
+      if (d == 3) { if (ok && nsets == 1 && iss && ser) { printf "%s", body; found = 1 }; cur = "" }
+      d--; next
+    }
+    d == 3 && /<key>issuerName<\/key>/ { iss = 1; next }
+    d == 3 && /<key>serialNumber<\/key>/ { ser = 1; next }
+    d == 4 && /<key>/ {
+      want = keyof($0)
+      if (want != "kSecTrustSettingsPolicy" && want != "kSecTrustSettingsPolicyName" && want != "kSecTrustSettingsResult") ok = 0
+      next
+    }
+    d == 4 && want == "kSecTrustSettingsPolicy" && !/<\/?data>/ { v = $0; gsub(/[ \t]/, "", v); pol = pol v; next }
+    d == 4 && want == "kSecTrustSettingsResult" && /<integer>/ { v = $0; gsub(/[^0-9]/, "", v); res = v; next }
+  '
+}
+
+# platform: what an empty admin domain imports from: a trustList with no entries, as 10.9 exports one
+CA_ADMIN_EMPTY_XML='<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>trustList</key>
+	<dict>
+	</dict>
+	<key>trustVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>'
+
+# spec: docs/TRUST-POLICY.md #8 and #9 -- ca_admin_batch add ENTRIES_FILE    (lines: SHA1 ISSUER_B64 SERIAL_B64)
+#                                       ca_admin_batch remove SHA1_FILE     (lines: SHA1)
+#       changes many admin settings with one trust-settings-import, which replaces the whole admin
+#       domain: every entry it isn't asked to add or remove is carried through byte for byte. An add
+#       copies an existing TLS-only denial, substituting the key, issuerName and serialNumber; with
+#       none to copy, it has add-trusted-cert make one for the first absent entry (no -k: no keychain
+#       import) and copies that. A SHA-1 already in the domain is never added over. When nothing
+#       would change, nothing is imported.
+# platform: security trust-settings-import -d denies a certificate in no keychain by its issuer and
+#           serial alone (the 2026-10-28 CI spike on 10.9)
+ca_admin_batch() {
+  _bop="$1"; _bin="$2"
+  case "$_bop" in add|remove) ;; *) ca_die "ca_admin_batch: unknown operation '$_bop'" ;; esac
+  # spec: every line is checked before any of it reaches a path or the XML
+  awk -v op="$_bop" '
+    !NF { next }
+    op == "add" && (NF != 3 || $2 !~ /^[A-Za-z0-9+\/]+=*$/ || $3 !~ /^[A-Za-z0-9+\/]+=*$/) { exit 1 }
+    op == "remove" && NF != 1 { exit 1 }
+    $1 !~ /^[0-9A-F]+$/ || length($1) != 40 { exit 1 }
+  ' "$_bin" || ca_die "could not read $_bin, or a line of it is malformed; changed nothing"
+
+  _bx="$(ca_admin_xml)" || exit 1
+  [ -n "$_bx" ] || _bx="$CA_ADMIN_EMPTY_XML"
+  _btm="$(mktemp "${TMPDIR:-/tmp}/ca-certs-template.XXXXXX")"
+  if [ "$_bop" = add ]; then
+    printf '%s\n' "$_bx" | ca_admin_template > "$_btm" || { rm -f "$_btm"; ca_die "could not read the admin trust settings for a TLS denial to copy"; }
+    if [ ! -s "$_btm" ]; then
+      _bk="$(printf '%s\n' "$_bx" | sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p')"
+      _bf=""
+      for _bs in $(awk 'NF { print $1 }' "$_bin"); do ca_in "$_bs" "$_bk" || { _bf="$_bs"; break; }; done
+      [ -n "$_bf" ] || { rm -f "$_btm"; return 0; }
+      "$SECURITY" add-trusted-cert -d -r deny -p ssl "$CA_TREE/share/ca-certs/blocked/$_bf.pem" \
+        || { rm -f "$_btm"; ca_die "could not deny $_bf for TLS, the entry the rest are copied from"; }
+      _bx="$(ca_admin_xml)" || { rm -f "$_btm"; exit 1; }
+      printf '%s\n' "$_bx" | ca_admin_template > "$_btm" || { rm -f "$_btm"; ca_die "could not read the admin trust settings for a TLS denial to copy"; }
+      [ -s "$_btm" ] || { rm -f "$_btm"; ca_die "security reported denying $_bf for TLS but the admin trust settings hold no such entry to copy"; }
+    fi
+  fi
+
+  _bsrc="$(mktemp "${TMPDIR:-/tmp}/ca-certs-admin-src.XXXXXX")"
+  _bout="$(mktemp "${TMPDIR:-/tmp}/ca-certs-admin-new.XXXXXX")"
+  _bclean() { rm -f "$_btm" "$_bsrc" "$_bout"; }
+  printf '%s\n' "$_bx" > "$_bsrc" || { _bclean; ca_die "could not write the admin trust settings to edit"; }
+  awk -v op="$_bop" -v tmpl="$_btm" -v list="$_bin" '
+    function keyof(s) { sub(/.*<key>/, "", s); sub(/<\/key>.*/, "", s); return s }
+    function issha(s) { return s ~ /^[0-9A-F]+$/ && length(s) == 40 }
+    BEGIN {
+      while ((getline l < list) > 0) {
+        if (split(l, f, " ") == 0) continue
+        if (op == "add") { n++; sha[n] = f[1]; val["issuerName", n] = f[2]; val["serialNumber", n] = f[3] }
+        else drop[f[1]] = 1
+      }
+      if (op == "add") while ((getline l < tmpl) > 0) t[++tn] = l
+    }
+    # one copy of the template per entry not already in the domain, with its own key, issuer and serial
+    function emit(   i, j, td, sw, ind, x) {
+      for (i = 1; i <= n; i++) {
+        if (sha[i] in present) continue
+        present[sha[i]] = 1
+        x = t[1]; sub(/<key>[0-9A-F]+<\/key>/, "<key>" sha[i] "</key>", x); print x
+        td = 0; sw = ""
+        for (j = 2; j <= tn; j++) {
+          x = t[j]
+          if (sw != "" && x ~ /<data>/ && x ~ /<\/data>/) { sub(/<data>.*<\/data>/, "<data>" val[sw, i] "</data>", x); print x; sw = ""; continue }
+          if (sw != "" && x ~ /<data>/) { print x; ind = x; sub(/<.*/, "", ind); continue }
+          if (sw != "" && x ~ /<\/data>/) { print ind val[sw, i]; print x; sw = ""; continue }
+          if (sw != "") continue
+          if (x ~ /<dict>/) td++
+          else if (x ~ /<\/dict>/) td--
+          else if (td == 1 && (x ~ /<key>issuerName<\/key>/ || x ~ /<key>serialNumber<\/key>/)) sw = keyof(x)
+          print x
+        }
+      }
+    }
+    {
+      line = $0; isopen = (line ~ /<dict>/); isclose = (line ~ /<\/dict>/)
+      if (skip) { if (isopen) d++; if (isclose && --d == 2) skip = 0; next }
+      if (d == 2 && tl && line ~ /<key>/ && issha(keyof(line))) {
+        k = keyof(line); present[k] = 1
+        if (k in drop) { skip = 1; next }
+      }
+      if (d == 1 && line ~ /<key>trustList<\/key>/) wanttl = 1
+      if (d == 1 && wanttl && line ~ /<dict\/>/) {
+        ind = line; sub(/<.*/, "", ind); print ind "<dict>"; emit(); print ind "</dict>"; wanttl = 0; next
+      }
+      if (isopen && ++d == 2 && wanttl) { tl = 1; wanttl = 0 }
+      if (isclose) { if (d == 2 && tl) { emit(); tl = 0 }; d-- }
+      print line
+    }
+  ' "$_bsrc" > "$_bout" || { _bclean; ca_die "could not edit the admin trust settings; changed nothing"; }
+  if cmp -s "$_bsrc" "$_bout"; then _bclean; return 0; fi
+  plutil -lint "$_bout" >/dev/null || { _bclean; ca_die "the edited admin trust settings are not a valid property list; changed nothing"; }
+  "$SECURITY" trust-settings-import -d "$_bout" || { _bclean; ca_die "could not import the edited admin trust settings"; }
+  _bclean
+}

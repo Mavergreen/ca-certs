@@ -2,10 +2,15 @@
 # platform: host-agnostic
 #   usage: security SUBCOMMAND ...     (a stand-in for /usr/bin/security in tests)
 #          State in $FAKE_SEC_STATE: `admin` holds "SHA1 RESULT [POLICY [POLICY_STRING]]" per admin
-#          trust setting, exported in the shape real 10.9 writes: no trustSettings for an unrestricted
-#          trustRoot, otherwise one setting with kSecTrustSettingsPolicy (ssl, smime or basic),
+#          trust setting, exported in the shape real 10.9's plutil xml1 writes (tabs, a multi-line
+#          issuerName, modDate, serialNumber): no trustSettings for an unrestricted trustRoot,
+#          otherwise one setting with kSecTrustSettingsPolicy (ssl, smime or basic),
 #          kSecTrustSettingsPolicyString (-s) and kSecTrustSettingsResult;
-#          `keychain` holds one SHA1 per certificate in System.keychain; `log` gets every call.
+#          `keychain` holds one SHA1 per certificate in System.keychain, which add-trusted-cert
+#          imports into only when given -k, as the real one does; `log` gets every call.
+#          trust-settings-import -d FILE replaces `admin` with one line per trustList key in FILE:
+#          "SHA1 deny ssl" when a setting holds result 3 and the ssl policy, else that SHA1's line
+#          from before, else "SHA1 trustRoot ". It keeps FILE as `imported.plist`.
 #          $FAKE_SEC_ROOT/Library/Security/Trust Settings/Admin.plist exists exactly when `admin`
 #          is non-empty, as on a real system -- unless FAKE_SEC_KEEP_EMPTY_ADMIN_FILE=1, which
 #          leaves it behind empty, as real 10.9 may do after the last setting is removed.
@@ -16,6 +21,7 @@
 #          FAKE_SEC_FAIL_REMOVE=SHA1       remove-trusted-cert exits 1 for that certificate
 #          FAKE_SEC_FAIL_DELETE=SHA1       delete-certificate exits 1 for that certificate
 #          FAKE_SEC_EMPTY_EXPORT=1         trust-settings-export exits 0 but writes an empty file
+#          FAKE_SEC_FAIL_IMPORT=1          trust-settings-import exits 1 and changes nothing
 #          FAKE_SEC_FAIL_ONCE=SUBCMD       the next call to SUBCMD exits 1, then behaves normally
 #          FAKE_SEC_FAIL_ONCE=SUBCMD:N     the Nth call to SUBCMD exits 1 (once), earlier and later
 #                                          calls behave normally -- e.g. :2 to fail a listing taken
@@ -54,32 +60,55 @@ case "$cmd" in
     [ -s "$S/admin" ] || { echo "SecTrustSettingsCreateExternalRepresentation: No Trust Settings were found." >&2; exit 1; }
     {
       printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-      printf '<plist version="1.0">\n<dict>\n<key>trustList</key>\n<dict>\n'
+      printf '<plist version="1.0">\n<dict>\n\t<key>trustList</key>\n\t<dict>\n'
       while read -r sha res pol str; do
-        printf '<key>%s</key>\n<dict>\n<key>issuerName</key>\n<data>\nZmFrZQ==\n</data>\n' "$sha"
-        if [ "$res" != restored ] && { [ "$res" != trustRoot ] || [ -n "$pol$str" ]; }; then
-          printf '<key>trustSettings</key>\n<array>\n<dict>\n'
+        printf '\t\t<key>%s</key>\n\t\t<dict>\n' "$sha"
+        printf '\t\t\t<key>issuerName</key>\n\t\t\t<data>\n\t\t\tZmFr\n\t\t\tZQ==\n\t\t\t</data>\n'
+        printf '\t\t\t<key>modDate</key>\n\t\t\t<date>2026-10-28T12:00:00Z</date>\n'
+        printf '\t\t\t<key>serialNumber</key>\n\t\t\t<data>\n\t\t\tAQ==\n\t\t\t</data>\n'
+        if [ "$res" != trustRoot ] || [ -n "$pol$str" ]; then
+          printf '\t\t\t<key>trustSettings</key>\n\t\t\t<array>\n\t\t\t\t<dict>\n'
           case "$pol" in
-            ssl) printf '<key>kSecTrustSettingsPolicy</key>\n<data>\nKoZIhvdjZAED\n</data>\n' ;;
-            smime) printf '<key>kSecTrustSettingsPolicy</key>\n<data>\nKoZIhvdjZAEI\n</data>\n' ;;
-            basic) printf '<key>kSecTrustSettingsPolicy</key>\n<data>\nKoZIhvdjZAEC\n</data>\n' ;;
+            ssl) printf '\t\t\t\t\t<key>kSecTrustSettingsPolicy</key>\n\t\t\t\t\t<data>\n\t\t\t\t\tKoZIhvdjZAED\n\t\t\t\t\t</data>\n' ;;
+            smime) printf '\t\t\t\t\t<key>kSecTrustSettingsPolicy</key>\n\t\t\t\t\t<data>\n\t\t\t\t\tKoZIhvdjZAEI\n\t\t\t\t\t</data>\n' ;;
+            basic) printf '\t\t\t\t\t<key>kSecTrustSettingsPolicy</key>\n\t\t\t\t\t<data>\n\t\t\t\t\tKoZIhvdjZAEC\n\t\t\t\t\t</data>\n' ;;
           esac
-          [ -z "$str" ] || printf '<key>kSecTrustSettingsPolicyString</key>\n<string>%s</string>\n' "$str"
+          [ -z "$str" ] || printf '\t\t\t\t\t<key>kSecTrustSettingsPolicyString</key>\n\t\t\t\t\t<string>%s</string>\n' "$str"
           case "$res" in trustRoot) n=1 ;; trustAsRoot) n=2 ;; deny) n=3 ;; *) n=4 ;; esac
-          printf '<key>kSecTrustSettingsResult</key>\n<integer>%s</integer>\n</dict>\n</array>\n' "$n"
+          printf '\t\t\t\t\t<key>kSecTrustSettingsResult</key>\n\t\t\t\t\t<integer>%s</integer>\n\t\t\t\t</dict>\n\t\t\t</array>\n' "$n"
         fi
-        printf '</dict>\n'
+        printf '\t\t</dict>\n'
       done < "$S/admin"
-      printf '</dict>\n<key>trustVersion</key>\n<integer>1</integer>\n</dict>\n</plist>\n'
+      printf '\t</dict>\n\t<key>trustVersion</key>\n\t<integer>1</integer>\n</dict>\n</plist>\n'
     } > "$2" ;;
   trust-settings-import)
     [ "$1" = -d ] || exit 2
-    sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1 restored/p' "$2" > "$S/admin"
+    if [ -n "${FAKE_SEC_FAIL_IMPORT:-}" ]; then echo "fake security: import failed" >&2; exit 1; fi
+    cp "$2" "$S/imported.plist"
+    awk -v prev="$S/admin" '
+      BEGIN { while ((getline l < prev) > 0) { split(l, f, " "); was[f[1]] = l } }
+      function done_entry() {
+        if (sha == "") return
+        if (denyssl) print sha " deny ssl"; else if (sha in was) print was[sha]; else print sha " trustRoot "
+        sha = ""
+      }
+      /<dict>/ { d++; if (d == 4) { pol = ""; res = "" } ; next }
+      /<\/dict>/ {
+        if (d == 4 && res == 3 && pol == "KoZIhvdjZAED") denyssl = 1
+        if (d == 3) done_entry()
+        d--; next
+      }
+      d == 2 && /<key>[0-9A-F]+<\/key>/ { k = $0; gsub(/.*<key>|<\/key>.*/, "", k); if (length(k) == 40) { sha = k; denyssl = 0 }; next }
+      d == 4 && /<key>/ { want = $0; gsub(/.*<key>|<\/key>.*/, "", want); next }
+      d == 4 && want == "kSecTrustSettingsPolicy" && !/<\/?data>/ { v = $0; gsub(/[ \t]/, "", v); pol = pol v; next }
+      d == 4 && want == "kSecTrustSettingsResult" && /<integer>/ { v = $0; gsub(/[^0-9]/, "", v); res = v; next }
+    ' "$2" > "$S/admin.t"
+    mv "$S/admin.t" "$S/admin"
     sync_admin_file ;;
   add-trusted-cert)
-    r=""; p=""; str=""; f=""
+    r=""; p=""; str=""; f=""; k=""
     while [ $# -gt 0 ]; do
-      case "$1" in -d) shift ;; -r) r="$2"; shift 2 ;; -p) p="$2"; shift 2 ;; -s) str="$2"; shift 2 ;; -k) shift 2 ;; *) f="$1"; shift ;; esac
+      case "$1" in -d) shift ;; -r) r="$2"; shift 2 ;; -p) p="$2"; shift 2 ;; -s) str="$2"; shift 2 ;; -k) k="$2"; shift 2 ;; *) f="$1"; shift ;; esac
     done
     sha="$(sha1_of "$f")"
     if [ "$sha" = "${FAKE_SEC_SILENT_ADD:-}" ]; then exit 0; fi
@@ -91,7 +120,7 @@ case "$cmd" in
     fi
     drop_admin "$sha"
     if [ -n "$str" ]; then printf '%s %s %s %s\n' "$sha" "$r" "$p" "$str" >> "$S/admin"; else printf '%s %s %s\n' "$sha" "$r" "$p" >> "$S/admin"; fi
-    grep -q "^$sha\$" "$S/keychain" || printf '%s\n' "$sha" >> "$S/keychain"
+    [ -z "$k" ] || grep -q "^$sha\$" "$S/keychain" || printf '%s\n' "$sha" >> "$S/keychain"
     sync_admin_file ;;
   remove-trusted-cert)
     [ "$1" = -d ] || exit 2
