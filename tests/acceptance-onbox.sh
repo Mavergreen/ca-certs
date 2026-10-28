@@ -34,8 +34,25 @@ cleanup() {
 trap cleanup EXIT
 
 probe() { /usr/bin/curl --noproxy '*' -sS -o /dev/null -m 20 -w '%{http_code}' "https://$1/" 2>/dev/null || :; }
+timed() {  # LABEL CMD...: run CMD, fail if it fails or takes 120 s or more, print how long it took
+  _l="$1"; shift
+  _s="$(date +%s)"
+  "$@" || fail "$_l failed"
+  _d=$(( $(date +%s) - _s ))
+  echo "acceptance-onbox: $_l took ${_d}s"
+  [ "$_d" -lt 120 ] || fail "$_l took ${_d}s; the bar is under 120s"
+}
+probe_cert() {  # HOST: fail only when curl cannot verify the certificate (exit 60); any other failure is a note
+  _rc=0
+  /usr/bin/curl --noproxy '*' -sS -o /dev/null -m 20 "https://$1/" 2>/dev/null || _rc=$?
+  [ "$_rc" -ne 60 ] || fail "$1 fails certificate verification (curl exit 60)"
+  [ "$_rc" -eq 0 ] || echo "note: $1 does not answer over TLS from here (curl exit $_rc)"
+}
 snap() {
-  security dump-trust-settings -d > "$1.admin" 2>&1 || :
+  # the export, not dump-trust-settings: the dump omits admin entries whose certificate is in no keychain (every blocked one)
+  : > "$1.admin.xml"
+  if security trust-settings-export -d "$1.admin.plist" >/dev/null 2>&1; then plutil -convert xml1 -o - "$1.admin.plist" > "$1.admin.xml" || : > "$1.admin.xml"; fi
+  sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p' "$1.admin.xml" | LC_ALL=C sort > "$1.admin"
   security find-certificate -a -Z /Library/Keychains/System.keychain | grep '^SHA-1' | sort > "$1.kc"
 }
 roots_of() {  # PKG NAME: the pkg's trusted/ and distrust/ roots, in $T/NAME/{trusted,distrust}
@@ -81,6 +98,25 @@ check_bundle() {  # LABEL RELEASE: the contract bundle is the shipped one, less 
   bundle_sha1s "$TREE/etc/openssl/certs/ca-certificates.crt" > "$T/in"
   diff "$T/want-in" "$T/in" >&2 || fail "after the $1, the bundle is not the shipped one less the denied roots (diff above)"
 }
+check_blocked() {  # LABEL: every shipped blocked intermediate is denied for TLS, with a setting and without a keychain home
+  _bd="$TREE/share/ca-certs/blocked"
+  ls "$_bd"/*.pem >/dev/null 2>&1 || return 0   # a release before the blocked set ships none
+  for c in "$_bd"/*.pem; do
+    openssl x509 -noout -fingerprint -sha1 -in "$c" | sed 's/.*=//' | tr -d :
+  done | LC_ALL=C sort > "$T/blocked.sha1"
+  sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p' "$T/$1.admin.xml" | LC_ALL=C sort > "$T/blocked.keys"
+  comm -23 "$T/blocked.sha1" "$T/blocked.keys" > "$T/blocked.missing"
+  [ ! -s "$T/blocked.missing" ] || fail "after the $1, the admin trust settings export has no key for $(wc -l < "$T/blocked.missing" | tr -d ' ') shipped blocked intermediates, first: $(head -1 "$T/blocked.missing")"
+  _first="$(ls "$_bd"/*.pem | head -1)"
+  security verify-cert -c "$_first" -p ssl -L > "$T/blocked.verify" 2>&1 || :
+  grep -q kSecTrustResultDeny "$T/blocked.verify" || fail "after the $1, $_first does not verify as kSecTrustResultDeny: $(cat "$T/blocked.verify")"
+  # the installer must not have imported any of them into System.keychain or the login/default keychain
+  { security find-certificate -a -Z /Library/Keychains/System.keychain 2>/dev/null || :; security find-certificate -a -Z 2>/dev/null || :; } \
+    | sed -n 's/^SHA-1 hash: //p' | LC_ALL=C sort -u > "$T/blocked.kc"
+  comm -12 "$T/blocked.sha1" "$T/blocked.kc" > "$T/blocked.imported"
+  [ ! -s "$T/blocked.imported" ] || fail "after the $1, blocked intermediates are in a keychain, first: $(head -1 "$T/blocked.imported")"
+  echo "acceptance-onbox: after the $1: $(wc -l < "$T/blocked.sha1" | tr -d ' ') blocked intermediates denied for TLS, in the admin settings, in no keychain"
+}
 expect_installed() {  # LABEL RELEASE: with RELEASE installed, every root's verdict is what it asks for
   verdicts > "$T/$1.v"
   check_bundle "$1" "$2"
@@ -89,9 +125,12 @@ expect_installed() {  # LABEL RELEASE: with RELEASE installed, every root's verd
     grep -q '^keychain no ' "$RECEIPT" || fail "after the $1 on macOS $os, the receipt must say the keychain was left alone: $(cat "$RECEIPT")"
     snap "$T/$1"
     diff "$T/before.admin" "$T/$1.admin" >&2 || fail "after the $1 on macOS $os, the admin trust settings changed (diff above); this macOS gets the bundle only"
+    diff "$T/before.admin.xml" "$T/$1.admin.xml" >&2 || fail "after the $1 on macOS $os, an admin trust setting's content changed (diff above)"
     cmp -s "$T/before.kc" "$T/$1.kc" || fail "after the $1 on macOS $os, System.keychain changed: $(comm -3 "$T/before.kc" "$T/$1.kc")"
   else
     grep -qx 'keychain yes' "$RECEIPT" || fail "after the $1 on Mac OS X $os, the receipt must say the keychain was changed: $(cat "$RECEIPT")"
+    snap "$T/$1"
+    check_blocked "$1"
   fi
   bad="$(while read -r n v; do
     if [ "$mode" = bundle ]; then
@@ -119,18 +158,20 @@ verdicts > "$T/before.v"
 echo "acceptance-onbox: before: $(grep -c ' trusted$' "$T/before.v") of $(wc -l < "$T/before.v" | tr -d ' ') roots verify"
 
 if [ -n "$PREV" ]; then
-  sudo installer -pkg "$PREV" -target / || fail "installing the previous release failed"
+  timed "previous-release install" sudo installer -pkg "$PREV" -target /
   expect_installed "previous-release install" prev
 fi
-sudo installer -pkg "$PKG" -target / || fail "install failed"
+timed "install" sudo installer -pkg "$PKG" -target /
 label=install; [ -z "$PREV" ] || label=upgrade
 expect_installed "$label" new
 for h in good.sca1a.amazontrust.com good.sca2a.amazontrust.com good.sca3a.amazontrust.com good.sca4a.amazontrust.com www.google.com www.apple.com github.com; do
   [ "$(probe "$h")" = 200 ] || echo "note: $h does not answer over TLS from here (the network, or this system's TLS)"
 done
+# anchor twins: OneCRL blocks the 10.9-shipped Certum Trusted Network CA 2, but ca-certs trusts a newer copy with the same name and key
+for h in www.certum.pl www.identrust.com; do probe_cert "$h"; done
 
 cp "$RECEIPT" "$T/receipt1"
-sudo installer -pkg "$PKG" -target / || fail "reinstall failed"
+timed "reinstall" sudo installer -pkg "$PKG" -target /
 # spec: payload/libexec/ca-certs-apply -- applied, nss and keychain are all rewritten by
 #       ca_receipt_set on every run (its line is deleted, then re-appended at the end), so a
 #       clean reinstall relocates all three even when only applied's VALUE is expected to change.
@@ -143,9 +184,10 @@ diff "$T/receipt1.norm" "$T/receipt2.norm" \
   || fail "a reinstall changed the receipt beyond its applied timestamp (diff above)"
 expect_installed reinstall new
 
-sudo /usr/local/bin/mavergreen uninstall ca-certs || fail "uninstall failed"
+timed "uninstall" sudo /usr/local/bin/mavergreen uninstall ca-certs
 snap "$T/after"
 diff "$T/before.admin" "$T/after.admin" || fail "uninstall did not restore the admin trust settings exactly (diff above)"
+diff "$T/before.admin.xml" "$T/after.admin.xml" || fail "uninstall did not restore the admin trust settings' content exactly (diff above)"
 cmp -s "$T/before.kc" "$T/after.kc" || fail "uninstall left certificates in System.keychain: $(comm -13 "$T/before.kc" "$T/after.kc")"
 verdicts > "$T/after.v"
 diff "$T/before.v" "$T/after.v" || fail "after uninstall, roots verify differently than before (diff above)"
