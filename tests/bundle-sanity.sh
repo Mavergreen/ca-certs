@@ -17,15 +17,25 @@ for f in "$D"/trusted/*.pem "$D"/distrust/*.pem; do
   s="$(openssl x509 -noout -fingerprint -sha1 -in "$f" | sed 's/.*=//' | tr -d :)" || fail "$f does not parse"
   [ "$(basename "$f" .pem)" = "$s" ] || fail "$f is named for another certificate (its SHA-1 is $s)"
 done
+# blocked intermediates ship apart from withdrawn roots: blocked/, never distrust/
 for f in "$R"/blocked/*.pem; do
   s="$(openssl x509 -noout -fingerprint -sha1 -in "$f" | sed 's/.*=//' | tr -d :)" || fail "$f does not parse"
-  [ -f "$D/distrust/$s.pem" ] || fail "blocked/$(basename "$f") is not distrusted by this release"
+  [ -f "$D/blocked/$s.pem" ] || fail "blocked/$(basename "$f") is not in this release's blocked/"
+  [ ! -f "$D/distrust/$s.pem" ] || fail "blocked/$(basename "$f") is in distrust/, which is for withdrawn roots"
 done
 for f in "$D"/distrust/*.pem; do
   [ ! -f "$D/trusted/$(basename "$f")" ] || fail "$(basename "$f") is both trusted and distrusted"
 done
 [ "$(grep -c '^trusted ' "$D/roots.txt")" = "$n" ] || fail "roots.txt does not list every trusted root"
 [ "$(grep -c '^distrusted ' "$D/roots.txt")" = "$(ls "$D/distrust" | grep -c '\.pem$')" ] || fail "roots.txt does not list every distrusted root"
+b="$(ls "$D/blocked" | grep -c '\.pem$')"
+[ "$b" -gt 0 ] || fail "blocked/ is empty"
+[ "$(grep -c '^blocked ' "$D/roots.txt")" = "$b" ] || fail "roots.txt does not list every blocked intermediate"
+[ "$(grep -c -v '^#' "$D/blocked.entries")" = "$b" ] || fail "blocked.entries must have one line per file in blocked/"
+sort -c "$D/blocked.entries" || fail "blocked.entries must be sorted"
+while read -r s1 iss ser; do
+  [ -f "$D/blocked/$s1.pem" ] && [ -n "$iss" ] && [ -n "$ser" ] || fail "blocked.entries line for $s1 is not SHA1 ISSUER_B64 SERIAL_B64 for a file in blocked/"
+done < "$D/blocked.entries"
 cmp -s "$D/aquatransport-roots.txt" "$R/aquatransport-roots.txt" || fail "the build must carry aquatransport-roots.txt as committed"
 [ -f "$D/ca-certificates.sha1" ] || fail "no ca-certificates.sha1: the applier needs it to leave denied roots out of the bundle"
 [ "$(wc -l < "$D/ca-certificates.sha1" | tr -d ' ')" = "$n" ] || fail "ca-certificates.sha1 must list one SHA-1 per certificate in the bundle"

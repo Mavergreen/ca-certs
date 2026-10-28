@@ -2,9 +2,10 @@
 # platform: host-agnostic
 #   usage: roots-notes.sh [--append NOTES] CURRENT_ROOTS_TXT [PREVIOUS_ROOTS_TXT]
 #          Prints the release notes' "### Roots" section: roots newly trusted or distrusted, and
-#          no longer trusted or distrusted, since the previous release. With no previous list, the
-#          counts. Starts with a blank line, so it appends as its own paragraph. With --append
-#          NOTES, writes the section into NOTES instead, immediately before its first line that is
+#          no longer trusted or distrusted, since the previous release, and blocked intermediates
+#          as counts (named too when 20 or fewer changed). With no previous list, the counts.
+#          Starts with a blank line, so it appends as its own paragraph. With --append NOTES,
+#          writes the section into NOTES instead, immediately before its first line that is
 #          exactly "---" (or at the end, if there is none), and refuses a missing or empty NOTES.
 # spec: tests/roots-notes.sh
 set -eu
@@ -19,7 +20,7 @@ cur="${1:?usage: roots-notes.sh [--append NOTES] CURRENT [PREVIOUS]}"; prev="${2
 section() {
   printf '\n### Roots\n\n'
   if [ -z "$prev" ]; then
-    printf -- '- Trusts %s roots and distrusts %s.\n' "$(grep -c '^trusted ' "$cur" || :)" "$(grep -c '^distrusted ' "$cur" || :)"
+    printf -- '- Trusts %s roots, distrusts %s, and blocks %s intermediates.\n' "$(grep -c '^trusted ' "$cur" || :)" "$(grep -c '^distrusted ' "$cur" || :)" "$(grep -c '^blocked ' "$cur" || :)"
     return 0
   fi
   T="$(mktemp -d "${TMPDIR:-/tmp}/roots-notes.XXXXXX")"
@@ -43,6 +44,14 @@ section() {
   group trusted "$T/removed" "No longer trusted" "$prev"
   group distrusted "$T/added" "Newly distrusted" "$cur"
   group distrusted "$T/removed" "No longer distrusted" "$prev"
+  # Blocked intermediates number in the hundreds: counts, and names only for a small change.
+  nb_add="$(grep -c '^blocked ' "$T/added" || :)"; nb_rem="$(grep -c '^blocked ' "$T/removed" || :)"
+  [ "$nb_add" = 0 ] || printf -- '- Newly blocks %s intermediates Mozilla blocks in OneCRL.\n' "$nb_add"
+  [ "$nb_rem" = 0 ] || printf -- '- No longer blocks %s (expired or unblocked).\n' "$nb_rem"
+  if [ "$((nb_add + nb_rem))" -le 20 ]; then
+    group blocked "$T/added" "Newly blocked" "$cur"
+    group blocked "$T/removed" "No longer blocked" "$prev"
+  fi
 }
 
 if [ -z "$append" ]; then
