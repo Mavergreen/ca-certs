@@ -151,6 +151,45 @@ ca_undo_import() {
   if ca_in "$1" "$_kc"; then ca_die "security reported deleting $1 but it is still in $CA_KC"; fi
 }
 
+# the lines of FILE whose first field is (in) or is not (out) one of the lines of SET
+sift() {
+  awk -v mode="$1" -v set="$3" '
+    BEGIN { while ((g = (getline l < set)) > 0) s[l] = 1; if (g < 0) exit 2 }
+    NF { if ((($1 in s) ? "in" : "out") == mode) print }
+  ' "$2" || ca_die "could not compare $2 with $3"
+}
+count() { awk 'END { print NR }' "$1" || ca_die "could not read $1"; }
+
+# spec: docs/TRUST-POLICY.md #8 and #9 -- ca_retire_blocked GONE WORK: GONE is a file of the blocked
+#       SHA-1s to retire, one per line; WORK is a directory to keep scratch files in. Their admin
+#       settings go in one removal. Each blocked line goes once a fresh export shows its setting
+#       gone (one already removed by hand is only forgotten), and so does any import .3 made; the
+#       call dies after that check if a key remains, whether the import did or not, and keeps the
+#       lines whose settings remain
+ca_retire_blocked() {
+  _rg="$1"; _rw="$2"
+  [ -s "$_rg" ] || return 0
+  _ra="$(ca_admin_keys)"; printf '%s\n' "$_ra" > "$_rw/admin"
+  sift in "$_rg" "$_rw/admin" > "$_rw/remove"
+  _rrc=0
+  if [ -s "$_rw/remove" ]; then
+    # ca_admin_batch dies on any failure; the subshell keeps this run to check what it left behind
+    set +e
+    (set -e; ca_admin_batch remove "$_rw/remove")
+    _rrc=$?
+    set -e
+  fi
+  _ra="$(ca_admin_keys)"; printf '%s\n' "$_ra" > "$_rw/admin"
+  sift out "$_rg" "$_rw/admin" > "$_rw/removed"
+  sift in "$_rg" "$_rw/admin" > "$_rw/stuck"
+  [ ! -s "$_rw/removed" ] || ca_receipt_bulk drop blocked "$_rw/removed"
+  ca_receipt_list imported > "$_rw/imported"
+  _runimport="$(sift in "$_rw/removed" "$_rw/imported")"
+  for _rs in $_runimport; do ca_undo_import "$_rs"; ca_receipt_drop imported "$_rs"; done
+  [ ! -s "$_rw/stuck" ] || ca_die "could not remove $(count "$_rw/stuck") blocked intermediates' admin settings"
+  [ "$_rrc" -eq 0 ] || ca_die "could not remove the blocked intermediates' admin settings"
+}
+
 # spec: docs/TRUST-POLICY.md #12 -- AquaTransport's "Modern Root Certificates" component never undoes
 #       its trust settings and skips a root already in System.keychain, so when its receipt has
 #       changed since our last run, it ran after us, and a root its list names that has an admin

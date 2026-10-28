@@ -14,6 +14,12 @@ CA_ROOT="${MAVERGREEN_ROOT:-/}"; CA_ROOT="${CA_ROOT%/}"
 ca_receipt_changes || exit 0
 ca_is_booted_root || ca_die "the trust changes in $CA_RECEIPT belong to the system on $CA_ROOT/; boot from it and run 'mavergreen uninstall ca-certs' there. Nothing was removed."
 ca_cede_to_aquatransport
+# spec: docs/TRUST-POLICY.md #8 and #9 -- the blocked intermediates' settings come off in one import;
+#       a key still there stops the uninstall with its line kept. preexisting ones are never listed
+work="$(mktemp -d "${TMPDIR:-/tmp}/ca-certs-uninstall.XXXXXX")" || ca_die "could not make a temporary directory"
+trap 'rm -rf "$work"' EXIT
+ca_receipt_list blocked > "$work/blocked"
+ca_retire_blocked "$work/blocked" "$work"
 for kind in trusted denied; do
   recorded="$(ca_receipt_list "$kind")"
   for sha in $recorded; do

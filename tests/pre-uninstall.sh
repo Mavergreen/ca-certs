@@ -160,4 +160,73 @@ hook 2>/dev/null || fail "the hook failed"
 [ "$(cat "$SEC/admin")" = "$B trustRoot " ] || fail "A's setting is ours, made after AquaTransport's root component ran: it must go: $(cat "$SEC/admin")"
 [ "$(cat "$SEC/keychain")" = "$B" ] || fail "A's certificate is one we imported: it must go: $(cat "$SEC/keychain")"
 
+# spec: docs/TRUST-POLICY.md #8, #9 and #14 -- blocked intermediates, as the pkg ships them, are
+#       removed from the admin domain in one import, and a key still there keeps the receipt
+mkblocked() {
+  mkdir -p "$TREE/share/ca-certs/blocked"
+  _m="$(mkcert "$1" "$TREE/share/ca-certs/blocked")"
+  printf '%s %s %s\n' "$_m" "$(printf 'issuer-%s' "$_m" | base64)" "$(printf 'serial-%s' "$_m" | base64)" >> "$TREE/share/ca-certs/blocked.entries"
+  printf '%s\n' "$_m"
+}
+calls() { grep -c "^$1" "$SEC/log" || :; }
+
+scenario "removes every blocked entry in one import"
+setup_applied
+BA="$(mkblocked ba)"; BB="$(mkblocked bb)"; BC="$(mkblocked bc)"
+sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "applying the blocked intermediates failed"
+grep -q "^blocked $BA\$" "$VAR/receipt" || fail "setup must record the blocked intermediates: $(cat "$VAR/receipt")"
+: > "$SEC/log"
+hook || fail "the hook failed"
+for b in $BA $BB $BC; do
+  if grep -q "^$b " "$SEC/admin"; then fail "$b must have no admin setting: $(cat "$SEC/admin")"; fi
+done
+[ "$(calls trust-settings-import)" = 1 ] || fail "every blocked entry must go in one import: $(cat "$SEC/log")"
+if grep -q -E '^(trusted|denied|imported|blocked) ' "$VAR/receipt"; then fail "undone entries must leave the receipt: $(cat "$VAR/receipt")"; fi
+[ "$(cat "$SEC/admin")" = "$B trustRoot " ] || fail "only the user's own setting may remain: $(cat "$SEC/admin")"
+
+scenario "uninstall leaves a user's entry alone"
+setup_applied
+BA="$(mkblocked ba)"; BU="$(mkblocked bu)"
+"$SECURITY" add-trusted-cert -d -r deny "$TREE/share/ca-certs/blocked/$BU.pem"
+sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "applying the blocked intermediates failed"
+grep -q "^preexisting $BU\$" "$VAR/receipt" || fail "the user's entry must be preexisting: $(cat "$VAR/receipt")"
+hook || fail "the hook failed"
+grep -q "^$BU deny " "$SEC/admin" || fail "the user's own entry must survive: $(cat "$SEC/admin")"
+if grep -q "^$BA " "$SEC/admin"; then fail "our entry must go: $(cat "$SEC/admin")"; fi
+
+scenario "a failed import keeps the receipt"
+setup_applied
+BA="$(mkblocked ba)"; BB="$(mkblocked bb)"
+sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "applying the blocked intermediates failed"
+if hook FAKE_SEC_FAIL_IMPORT=1 2>"$T/err"; then fail "a failed import must fail the hook, so nothing is removed"; fi
+grep -q "^blocked $BA\$" "$VAR/receipt" && grep -q "^blocked $BB\$" "$VAR/receipt" \
+  || fail "blocked entries still set must stay for the retry: $(cat "$VAR/receipt")"
+grep -q "^$BA deny ssl\$" "$SEC/admin" || fail "the failed import must change nothing: $(cat "$SEC/admin")"
+hook || fail "the retry must finish the undo"
+if grep -q -E '^(trusted|denied|imported|blocked) ' "$VAR/receipt"; then fail "the retry must leave nothing recorded: $(cat "$VAR/receipt")"; fi
+
+scenario "a blocked setting the user already removed is just forgotten"
+setup_applied
+BA="$(mkblocked ba)"; BB="$(mkblocked bb)"
+sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "applying the blocked intermediates failed"
+"$SECURITY" remove-trusted-cert -d "$TREE/share/ca-certs/blocked/$BA.pem"
+hook || fail "the hook failed"
+if grep -q -E '^(trusted|denied|imported|blocked) ' "$VAR/receipt"; then fail "both entries must leave the receipt: $(cat "$VAR/receipt")"; fi
+if grep -q "^$BB " "$SEC/admin"; then fail "BB must go: $(cat "$SEC/admin")"; fi
+
+scenario "uninstall after a .3 upgrade deletes the keychain copy"
+setup_applied
+hook || fail "clearing the setup's receipt failed"
+sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "re-applying failed"
+BE="$(mkcert be "$TREE/share/ca-certs/distrust")"
+sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "the .3-shaped apply failed"
+grep -q "^denied $BE\$" "$VAR/receipt" || fail "setup must record BE as denied: $(cat "$VAR/receipt")"
+mv "$TREE/share/ca-certs/distrust/$BE.pem" "$TREE/share/ca-certs/blocked/" 2>/dev/null || { mkdir -p "$TREE/share/ca-certs/blocked"; mv "$TREE/share/ca-certs/distrust/$BE.pem" "$TREE/share/ca-certs/blocked/"; }
+printf '%s %s %s\n' "$BE" "$(printf 'issuer-%s' "$BE" | base64)" "$(printf 'serial-%s' "$BE" | base64)" >> "$TREE/share/ca-certs/blocked.entries"
+sh "$TREE/libexec/ca-certs-apply" --root "$ROOT" 2>/dev/null || fail "the upgrading apply failed"
+grep -q "^blocked $BE\$" "$VAR/receipt" && grep -q "^imported $BE\$" "$VAR/receipt" || fail "setup must be migrated: $(cat "$VAR/receipt")"
+hook || fail "the hook failed"
+if grep -q "^$BE " "$SEC/admin"; then fail "BE's admin setting must go: $(cat "$SEC/admin")"; fi
+if grep -qx "$BE" "$SEC/keychain"; then fail "BE's keychain copy must go: $(cat "$SEC/keychain")"; fi
+
 echo "pre-uninstall: ok"
