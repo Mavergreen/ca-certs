@@ -227,7 +227,7 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
         if (sorted(held) == current and md == committed_md
                 and entries == read_or_none(os.path.join(repo, 'blocked.entries'))
                 and all(read_or_none(os.path.join(blocked_dir, s + '.pem')) == c['pem'] for s, c in held.items())):
-            print('onecrl: nothing changed but time (expiries, gap entries aging out); the committed files stay', file=sys.stderr)
+            print('onecrl: no difference from the committed files but expiries and gap entries aging out, if any; nothing written', file=sys.stderr)
             return
 
     stale = [s for s in current if s not in kept]
