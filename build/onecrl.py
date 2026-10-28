@@ -1,18 +1,18 @@
-# platform: CI-only -- python3, standard library only; the 10.9 build reads the committed output
+# platform: host-agnostic -- CI-only: python3, standard library only; the 10.9 build reads the committed output
 #   usage: onecrl.py --onecrl FILE --ccadb FILE [--ccadb FILE] --now YYYY-MM-DD --repo DIR [--allow-mass-removal]
 #          Matches each CCADB intermediate to OneCRL by issuer DER plus serial, or by subject DER plus
 #          the SHA-256 of its SubjectPublicKeyInfo; keeps those CCADB says expire after --now; and
-#          rewrites DIR/blocked.md, DIR/blocked/SHA256.pem and DIR/blocked.entries. A guard or input
-#          error exits 1, naming it, having written nothing.
-#          onecrl.py --entries-only --repo DIR
-#          Rewrites DIR/blocked.entries from DIR/blocked/*.pem alone.
+#          rewrites DIR/blocked.md, DIR/blocked/SHA256.pem and DIR/blocked.entries. A CCADB row whose
+#          certificate it cannot read is counted and named in blocked.md's gap section. A guard or
+#          input error exits 1, naming it, having written nothing.
 # spec: tests/onecrl.sh, docs/TRUST-POLICY.md #14
 import argparse, base64, csv, datetime, hashlib, json, os, re, sys
 
 MIN_RECORDS = 1000
 MAX_REMOVAL = 0.10
 COLUMNS = ('Certificate Subject Common Name', 'Certificate Subject Organization',
-           'Certificate Issuer Common Name', 'SHA-256 Fingerprint', 'Valid To [GMT]', 'PEM Info')
+           'Certificate Issuer Common Name', 'Certificate Issuer Organization', 'SHA-256 Fingerprint',
+           'Valid To [GMT]', 'PEM Info')
 PEM_RE = re.compile(r'-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----', re.S)
 ONECRL_RECORDS = 'https://firefox.settings.services.mozilla.com/v1/buckets/security-state/collections/onecrl/records'
 ENTRIES_FORMAT = '# SHA256 SHA1 ISSUER_DER_BASE64 SERIAL_CONTENT_BASE64, one per blocked.md row, sorted by SHA-256'
@@ -68,10 +68,14 @@ def common_name(name_der):
 
 
 def pem_der(text):
-    m = PEM_RE.search(text)
+    """(PEM, DER) of the first certificate in text; (None, None) when there is none or it does not decode."""
+    m = PEM_RE.search(text or '')
     if not m:
         return None, None
-    return m.group(0) + '\n', base64.b64decode(''.join(m.group(1).split()))
+    try:
+        return m.group(0) + '\n', base64.b64decode(''.join(m.group(1).split()), validate=True)
+    except ValueError:
+        return None, None
 
 
 def entry_line(der):
@@ -84,8 +88,13 @@ def entries_text(header, ders):
     return '\n'.join(header + [ENTRIES_FORMAT] + sorted(entry_line(d) for d in ders)) + '\n'
 
 
+def details(record):
+    d = record.get('details')
+    return d if isinstance(d, dict) else {}
+
+
 def bug_number(record):
-    m = re.search(r'(\d+)\s*$', str(record.get('details', {}).get('bug') or ''))
+    m = re.search(r'(\d+)\s*$', str(details(record).get('bug') or ''))
     return int(m.group(1)) if m else None
 
 
@@ -107,7 +116,7 @@ def load_onecrl(path):
     try:
         with open(path, encoding='utf-8') as f:
             records = json.load(f)['data']
-        if not isinstance(records, list):
+        if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
             raise ValueError
     except (OSError, ValueError, KeyError, TypeError):
         raise Refusal('%s: OneCRL download is empty or does not parse' % path)
@@ -147,15 +156,18 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
         if 'subject' in r and 'pubKeyHash' in r:
             by_key.setdefault(('key', r['subject'], r['pubKeyHash']), []).append(r)
 
-    matched_ids, kept = set(), {}
+    matched_ids, kept, unreadable = set(), {}, {}
     for rows in reports:
         for row in rows:
             pem, der = pem_der(row['PEM Info'])
-            if der is None:
-                continue
             try:
-                f = tbs_fields(der)
+                f = tbs_fields(der) if der is not None else None
             except (IndexError, ValueError):
+                f = None
+            if f is None:
+                # spec: a certificate this cannot read might be one OneCRL blocks, so it is named, not skipped
+                unreadable[cell(row['SHA-256 Fingerprint'] or '')] = cell(
+                    row['Certificate Subject Common Name'] or row['Certificate Subject Organization'] or '')
                 continue
             hits = (by_key.get(('serial', b64(f['issuer']), b64(f['serial'])), [])
                     + by_key.get(('key', b64(f['subject']), b64(hashlib.sha256(f['spki']).digest())), []))
@@ -163,7 +175,7 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
                 continue
             matched_ids.update(id(r) for r in hits)
             try:
-                until = datetime.datetime.strptime(row['Valid To [GMT]'].strip(), '%Y %b %d').date()
+                until = datetime.datetime.strptime((row['Valid To [GMT]'] or '').strip(), '%Y %b %d').date()
             except ValueError:
                 raise Refusal('CCADB row %s has a Valid To I cannot read: %r'
                               % (row['SHA-256 Fingerprint'], row['Valid To [GMT]']))
@@ -175,8 +187,8 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
                 continue
             kept[sha256] = {'pem': pem, 'der': der, 'until': until, 'hits': hits,
                             'name': '%s, signed by %s' % (
-                                cell(row['Certificate Subject Common Name'] or row['Certificate Subject Organization']),
-                                cell(row['Certificate Issuer Common Name']))}
+                                cell(row['Certificate Subject Common Name'] or row['Certificate Subject Organization'] or ''),
+                                cell(row['Certificate Issuer Common Name'] or row['Certificate Issuer Organization'] or ''))}
 
     blocked_dir = os.path.join(repo, 'blocked')
     current = sorted(n[:-4] for n in os.listdir(blocked_dir) if n.endswith('.pem')) if os.path.isdir(blocked_dir) else []
@@ -193,7 +205,7 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
     since = now - datetime.timedelta(days=365)
     recent = []
     for r in unmatched:
-        created = str(r.get('details', {}).get('created') or '')
+        created = str(details(r).get('created') or '')
         try:
             day = datetime.date.fromisoformat(created[:10])
         except ValueError:
@@ -221,13 +233,18 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
         md += ['| %s | %s | %s |' % (cite, name, day) for day, _id, cite, name in recent]
     else:
         md.append('None.')
+    md += ['', '**%d CCADB rows** carry no certificate the generator can read (no PEM, or one that does not parse), so it' % len(unreadable),
+           'can\'t tell whether OneCRL blocks them.']
+    if unreadable:
+        md += ['', '| SHA-256 | Subject |', '|---|---|']
+        md += ['| `%s` | %s |' % (sha256, name) for sha256, name in sorted(unreadable.items())]
 
     write_all(repo, kept, stale, '\n'.join(md) + '\n',
               entries_text(['# ' + stamp + ' Do not edit it by hand.'], [c['der'] for c in kept.values()]))
 
 
 def gap_name(record):
-    name = record.get('details', {}).get('name') or ''
+    name = details(record).get('name') or ''
     if name:
         return name
     try:
@@ -257,35 +274,22 @@ def write_all(repo, kept, stale, md, entries):
     replace(os.path.join(repo, 'blocked.md'), md)
 
 
-def entries_only(repo):
-    blocked_dir = os.path.join(repo, 'blocked')
-    ders = []
-    for n in sorted(os.listdir(blocked_dir)):
-        if n.endswith('.pem'):
-            with open(os.path.join(blocked_dir, n), encoding='ascii') as f:
-                ders.append(pem_der(f.read())[1])
-    replace(os.path.join(repo, 'blocked.entries'),
-            entries_text(['# build/onecrl.py --entries-only computed this from blocked/. Do not edit it by hand.'], ders))
-
-
 def main():
     p = argparse.ArgumentParser(prog='onecrl.py')
-    p.add_argument('--onecrl')
-    p.add_argument('--ccadb', action='append', default=[])
-    p.add_argument('--now', type=datetime.date.fromisoformat)
+    p.add_argument('--onecrl', required=True)
+    p.add_argument('--ccadb', action='append', required=True)
+    p.add_argument('--now', type=datetime.date.fromisoformat, required=True)
     p.add_argument('--repo', required=True)
     p.add_argument('--allow-mass-removal', action='store_true')
-    p.add_argument('--entries-only', action='store_true')
     a = p.parse_args()
     try:
-        if a.entries_only:
-            entries_only(a.repo)
-        else:
-            if not (a.onecrl and a.ccadb and a.now):
-                p.error('--onecrl, --ccadb and --now are required')
-            generate(a.onecrl, a.ccadb, a.now, a.repo, a.allow_mass_removal)
+        generate(a.onecrl, a.ccadb, a.now, a.repo, a.allow_mass_removal)
     except Refusal as e:
         print('onecrl: %s' % e, file=sys.stderr)
+        return 1
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as e:
+        # spec: an input shaped unlike any seen is named, not a traceback; nothing has been written yet
+        print('onecrl: the input is not shaped as expected (%s: %s); nothing written' % (type(e).__name__, e), file=sys.stderr)
         return 1
     return 0
 

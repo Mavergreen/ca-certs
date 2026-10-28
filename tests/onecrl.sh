@@ -78,8 +78,15 @@ def write(name, header, rows):
 write('revoked.csv', REVOKED, [row('X', 'Sub X', 'Test Org', '2031 Mar 15'), row('Z', 'Sub Z', 'Test Org', '2020 Jan 01')])
 write('all.csv', ALL, [row('X', 'Sub X', 'Test Org', '2031 Mar 15'), row('Y', '', 'Pipe|Org', '2030 Jan 01'),
                        row('W', 'Sub W', 'Test Org', '2030 Jan 01')]
-                      + [row(f'V{k}', f'Sub V{k}', 'Filler Org', '2029 Jun 30') for k in range(1, 7)])
+                      + [row(f'V{k}', f'Sub V{k}', 'Filler Org', '2029 Jun 30') for k in range(1, 4)]
+                      # spec: build/onecrl.py -- CCADB gives V4's issuer no CN, so its row names the issuer's O
+                      + [dict(row('V4', 'Sub V4', 'Filler Org', '2029 Jun 30'), **{'Certificate Issuer Common Name': ''})]
+                      + [row(f'V{k}', f'Sub V{k}', 'Filler Org', '2029 Jun 30') for k in range(5, 7)])
 write('nopem.csv', [h for h in ALL if h != 'PEM Info'], [])
+bad = dict(row('W', 'Sub W', 'Test Org', '2030 Jan 01'), **{'SHA-256 Fingerprint': 'AB' * 32, 'Certificate Subject Common Name': 'Sub Garbled',
+                                                         'PEM Info': "'-----BEGIN CERTIFICATE-----\nMIIBAgMEBQ==\n-----END CERTIFICATE-----'"})
+gone = dict(row('W', 'Sub W', 'Test Org', '2030 Jan 01'), **{'SHA-256 Fingerprint': 'CD' * 32, 'Certificate Subject Common Name': 'Sub Pemless', 'PEM Info': ''})
+write('unreadable.csv', ALL, [bad, gone, bad])
 EOF
 # spec: build/onecrl.py -- 988 fillers plus 11 records is 999, one short of the guard
 python3 -I "$T/fixture.py" "$T" 988 >/dev/null
@@ -124,6 +131,7 @@ grep -qx "| Sub X, signed by Test Root | \`$S256_X\` | \[1111\](https://bugzilla
 $(cat "$M")"
 grep -q "^| Pipe/Org, signed by Test Root | \`$S256_Y\` | \[2222\](https://bugzilla.mozilla.org/show_bug.cgi?id=2222) | 2030 |\$" "$M" || fail "Y's row must cite bug 2222"
 grep -q "^| Sub V3, signed by Test Root | \`$S256_V3\` | \[6003\](https://bugzilla.mozilla.org/show_bug.cgi?id=6003) | 2029 |\$" "$M" || fail "V3's row must cite bug 6003"
+grep -q "^| Sub V4, signed by Test Org | \`$S256_V4\` | " "$M" || fail "V4's issuer has no CN in CCADB, so its row must name the issuer's O"
 grep -q '^| Intermediate | SHA-256 | Bug | Expires |$' "$M" || fail "blocked.md's table header is not | Intermediate | SHA-256 | Bug | Expires |"
 grep -q 'build/onecrl.sh' "$M" && grep -q "$NOW" "$M" && grep -q '2026-10-21' "$M" \
   || fail "blocked.md must say build/onecrl.sh generated it, from OneCRL as of 2026-10-21, on $NOW"
@@ -168,5 +176,35 @@ refuses "$T/mass" "mass removal" --onecrl "$T/onecrl.json" --ccadb "$T/revoked.c
 gen "$T/mass" --allow-mass-removal > "$T/out" 2>&1 || fail "--allow-mass-removal still refused: $(cat "$T/out")"
 [ ! -f "$T/mass/blocked/$S256_Z.pem" ] && [ ! -f "$T/mass/blocked/$S256_W.pem" ] || fail "--allow-mass-removal kept stale files"
 diff -r "$T/before/blocked" "$T/mass/blocked" || fail "--allow-mass-removal left a different blocked/"
+
+scenario "names the CCADB rows it cannot read"
+mkdir "$T/unread"
+python3 -I "$G" --onecrl "$T/onecrl.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --ccadb "$T/unreadable.csv" \
+  --now "$NOW" --repo "$T/unread" > "$T/out" 2>&1 || fail "a CCADB row with no PEM, or a PEM that does not parse, failed the run: $(cat "$T/out")"
+U="$T/unread/blocked.md"
+grep -q '\*\*2 CCADB rows\*\*' "$U" || fail "blocked.md must count the 2 CCADB rows it could not read, once each:
+$(cat "$U")"
+grep -q "^| \`ABABABAB[0-9A-F]*\` | Sub Garbled |\$" "$U" || fail "blocked.md must name the row whose PEM does not parse by SHA-256 and subject"
+grep -q "^| \`CDCDCDCD[0-9A-F]*\` | Sub Pemless |\$" "$U" || fail "blocked.md must name the row with no PEM by SHA-256 and subject"
+grep -q '\*\*0 CCADB rows\*\*' "$M" || fail "blocked.md from readable input must still say how many CCADB rows it could not read"
+
+scenario "names bad input instead of a traceback"
+printf '{"data": [%s]}' "$(yes '"not a record"' | head -1000 | paste -sd, -)" > "$T/strings.json"
+refuses "$T/repo" "onecrl:" --onecrl "$T/strings.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv"
+! grep -q Traceback "$T/out" || fail "a OneCRL download of strings, not records, printed a traceback: $(cat "$T/out")"
+
+scenario "the bot runs daily, before reconcile, and can't skip the guards"
+Y="$R/.github/workflows/onecrl.yml"
+[ -f "$Y" ] || fail "no .github/workflows/onecrl.yml"
+grep -q "^    - cron: '17 5 \* \* \*'\$" "$Y" || fail "onecrl.yml must run daily at 05:17 UTC, two hours before reconcile.yml's 07:17, so its PR's checks finish first"
+grep -q '^ *sh build/onecrl.sh' "$Y" || fail "onecrl.yml must run sh build/onecrl.sh"
+mass="$(grep -v '^[[:space:]]*#' "$Y" | grep -e '--allow-mass-removal' || :)"
+[ -n "$mass" ] || fail "onecrl.yml must pass --allow-mass-removal when the dispatch input asks"
+printf '%s\n' "$mass" | grep -v 'inputs.allow_mass_removal' | grep -q . \
+  && fail "--allow-mass-removal appears outside the allow_mass_removal dispatch input: $mass"
+propose="$(sed -n '/^  propose:/,$p' "$Y")"
+[ -n "$propose" ] || fail "onecrl.yml has no propose job"
+! printf '%s\n' "$propose" | grep -v '^[[:space:]]*#' | grep -Eq '(sh|python3[^ ]*) +([^ ]+ +)*[^ ]*build/onecrl\.(sh|py)' \
+  || fail "the propose job, which holds the App token, must not run the generator: it reads no upstream bytes"
 
 echo "onecrl: ok"

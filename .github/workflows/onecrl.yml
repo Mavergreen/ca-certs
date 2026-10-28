@@ -1,0 +1,152 @@
+name: onecrl
+
+# spec: docs/TRUST-POLICY.md #14, build/onecrl.sh -- blocked.md, blocked/ and blocked.entries copy the
+#       intermediates Mozilla blocks in OneCRL. OneCRL has no versioned feed for Renovate to read, so this
+#       regenerates them daily and proposes any change as a pull request, in two jobs, as swift's pins-bot:
+#       - generate (contents: read) downloads OneCRL and CCADB and runs the generator. Upstream's bytes are
+#         read there, never beside a token that can write. A tripped guard (too few records, a bad download,
+#         a mass removal) fails this job, so a red scheduled run is the alarm, and nothing reaches propose.
+#       - propose reads no upstream byte: it lays generate's artifact over main, commits it to onecrl/update
+#         as the Mavergreen pins-bot GitHub App (org variable PINS_BOT_CLIENT_ID, org secret
+#         PINS_BOT_PRIVATE_KEY; minted here with contents and pull-requests write alone), and opens or
+#         updates the PR with automerge. A push or PR made with GITHUB_TOKEN starts no workflow; the App's
+#         PR starts release.yml like any PR, and that run's required checks (the build, tests/blocked.sh
+#         among them, and the 10.9 job) gate the automerge. The merge moves the declared state, and
+#         reconcile.yml cuts the release.
+#       A real mass removal (OneCRL entries leave only when they expire) goes through workflow_dispatch with
+#       allow_mass_removal, the only way past that guard.
+
+on:
+  schedule:
+    # spec: two hours before reconcile.yml's 07:17, so the PR's checks (about an hour, with 10.9's) finish
+    #       and it merges before the nightly release looks at the declared state
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      allow_mass_removal:
+        description: "Let this run remove more than 10% of blocked/ (OneCRL really dropped them)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+# spec: .github/workflows/onecrl.yml propose -- two runs at once would force-push the same branch; the
+#       second waits for the first.
+concurrency:
+  group: onecrl
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          persist-credentials: false   # this job pushes nothing; its token stays out of .git/config
+
+      - name: Install shipyard
+        uses: Mavergreen/shipyard/.github/actions/install@v1
+
+      - name: Regenerate blocked.md from OneCRL and CCADB
+        # spec: build/onecrl.py MAX_REMOVAL -- the flag is passed only when a person asked for it on a
+        #       dispatch; a scheduled run has no inputs, so it can't skip the guard.
+        run: |
+          set -eu
+          sh build/onecrl.sh ${{ inputs.allow_mass_removal && '--allow-mass-removal' || '' }}
+
+      - name: Did anything change?
+        id: diff
+        run: |
+          set -eu
+          if [ -n "$(git status --porcelain -- blocked.md blocked blocked.entries)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: steps.diff.outputs.changed == 'true'
+        with:
+          name: onecrl
+          path: |
+            blocked.md
+            blocked.entries
+            blocked/
+          if-no-files-found: error
+          retention-days: 7
+
+  propose:
+    needs: generate
+    if: needs.generate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: A pins-bot App token, contents and pull-requests write on this repository alone
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.PINS_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.PINS_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # spec: .github/workflows/onecrl.yml -- this keeps the App's credentials (checkout's default)
+      #       because the `git push` below authenticates with them: persisting none, as generate does,
+      #       would break the push, not harden it.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          token: ${{ steps.app.outputs.token }}
+
+      # spec: build/onecrl.py write_all -- blocked/ is emptied first, so a certificate the generator
+      #       dropped is gone, not left behind.
+      - name: Clear blocked/ for the generated one
+        run: rm -rf blocked
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: onecrl
+          path: .
+
+      - name: Commit to onecrl/update, as the App, from main
+        id: commit
+        run: |
+          set -eu
+          git checkout -q -B onecrl/update
+          git add -A -- blocked.md blocked blocked.entries
+          added="$(git diff --cached --no-renames --name-status -- blocked | grep -c '^A' || :)"
+          removed="$(git diff --cached --no-renames --name-status -- blocked | grep -c '^D' || :)"
+          echo "added=$added" >> "$GITHUB_OUTPUT"
+          echo "removed=$removed" >> "$GITHUB_OUTPUT"
+          git -c user.name='mavergreen-pins-bot[bot]' -c user.email='342268518+mavergreen-pins-bot[bot]@users.noreply.github.com' \
+            commit -q -m "Follow OneCRL: $added intermediates newly blocked, $removed no longer" \
+            -m 'Written by .github/workflows/onecrl.yml from OneCRL and CCADB (build/onecrl.sh). blocked.md says which snapshot.'
+          git push --force origin HEAD:refs/heads/onecrl/update
+
+      - name: Open or update the pull request, and merge it when its checks pass
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          ADDED: ${{ steps.commit.outputs.added }}
+          REMOVED: ${{ steps.commit.outputs.removed }}
+        run: |
+          set -eu
+          title="Follow OneCRL: $ADDED intermediates newly blocked, $REMOVED no longer"
+          body="$(printf '%s\n\n%s\n\n%s\n' \
+            "Mozilla's OneCRL changed: **$ADDED** intermediates newly blocked, **$REMOVED** no longer (expired, or dropped by Mozilla)." \
+            "Generated by .github/workflows/onecrl.yml with build/onecrl.sh; see blocked.md for the snapshot and the gap. docs/TRUST-POLICY.md #14 says why." \
+            "It merges itself when release.yml's required checks pass; the next reconcile.yml run releases it.")"
+          pr="$(gh pr list --head onecrl/update --base main --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "$title" --body "$body"
+          else
+            gh pr create --base main --head onecrl/update --title "$title" --body "$body"
+          fi
+          gh pr merge onecrl/update --auto --squash

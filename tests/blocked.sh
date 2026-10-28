@@ -12,9 +12,10 @@ for s in $rows; do
   [ -f "$f" ] || fail "blocked.md lists $s but blocked/$s.pem is missing"
   got="$(openssl x509 -noout -fingerprint -sha256 -in "$f" | sed 's/.*=//' | tr -d :)" || fail "$f does not parse"
   [ "$got" = "$s" ] || fail "blocked/$s.pem holds a certificate whose SHA-256 is $got"
-  [ "$(openssl x509 -noout -subject -nameopt RFC2253 -in "$f")" != "subject=$(openssl x509 -noout -issuer -nameopt RFC2253 -in "$f" | sed 's/^issuer=//')" ] \
-    || fail "blocked/$s.pem is self-signed: a root Mozilla withdrew belongs in withdrawn.md"
 done
+# spec: docs/TRUST-POLICY.md #14 -- a blocked certificate may be self-signed (OneCRL blocks a few roots,
+#       two of them roots 10.9 ships), but never one ca-certs trusts. That needs certdata.txt, which this
+#       test doesn't download: build/build-bundle.sh dies on it at every build.
 for f in "$R"/blocked/*.pem; do
   s="$(basename "$f" .pem)"
   printf '%s\n' "$rows" | grep -q "^$s\$" || fail "blocked/$s.pem has no row in blocked.md"

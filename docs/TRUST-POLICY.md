@@ -352,9 +352,13 @@ hostname, doesn't count.
 
 ## 14. Intermediates Mozilla blocks in OneCRL are distrusted for TLS too
 
-**Decision:** each intermediate certificate `blocked.md` lists is distrusted for secure websites
-(TLS), the same way as a withdrawn root (#6). `blocked.md` copies Mozilla's OneCRL, its list of
-intermediates Firefox refuses, citing the Mozilla bug behind each entry.
+**Decision:** each certificate `blocked.md` lists is distrusted for secure websites (TLS), the same
+way as a withdrawn root (#6). `blocked.md` is Mozilla's OneCRL, its list of intermediates Firefox
+refuses, every unexpired entry and nothing filtered by us, each row citing the Mozilla bug behind
+its entry. `build/onecrl.sh` generates it, with `blocked/` and `blocked.entries`, and nobody edits
+it by hand. `.github/workflows/onecrl.yml` runs the generator every day and proposes any change as
+a pull request. The pull request merges itself when the release checks pass, and the nightly
+release ships it.
 
 **Why:** Mozilla publishes its trust decisions in two places. `certdata.txt` says which roots to
 trust, and ca-certs follows it (#1). OneCRL blocks intermediates, and ca-certs didn't read it. When
@@ -362,7 +366,29 @@ eMudhra's intermediates turned out to have recoverable private keys (October 202
 [2083382](https://bugzilla.mozilla.org/show_bug.cgi?id=2083382)), Mozilla blocked them in OneCRL.
 Sectigo had cross-signed them from AAA Certificate Services, which 10.9 trusts and Apple no longer
 updates. So without this, a 10.9 Mac with ca-certs still accepted them. Following OneCRL is Mozilla
-making the decision, not ca-certs.
+making the decision, not ca-certs, and following it automatically keeps it that way.
+
+**How the list is made:** OneCRL names a certificate by its issuer and serial number, or by its
+subject and key, never by the certificate itself, and a trust setting needs the certificate. So the
+generator matches OneCRL against CCADB's reports of intermediates, which carry each certificate. It
+refuses, and changes nothing, when OneCRL has fewer than 1,000 records, when a download is empty or
+doesn't parse, or when a run would remove more than 10% of `blocked/` at once. OneCRL entries leave
+only when their certificates expire, so a large removal means bad input. A real one goes through a
+manual run of `onecrl.yml` that allows it.
+
+**Cost, measured on 10.9 (2026-10-28, 774 certificates):**
+
+- About 1 s to apply them all in one trust-settings import (0.94 s), and 0.79 s to remove them.
+  One `add-trusted-cert` each took 3 min 53 s, and removing them 5 min 13 s.
+- About 8 ms once per new process, to read the larger trust-settings file. Accepted: it's paid once,
+  not per connection, and 50 `curl` requests showed no difference (−1%).
+
+**Sites, measured on 10.9 (2026-10-28):** no site that loaded broke. Of the Tranco top 10,000,
+only 4 sites serve a blocked certificate. Three already failed, two on a revoked certificate and
+one on an expired one, and now fail on the deny instead. The fourth, fortinet.com, serves a blocked
+"DigiCert Global CA G2", and still loads: 10.9 built a path around it, as Firefox does. The 27
+sites of the CAs whose blocked certificates have unblocked twins, and the top 100, gave the same
+results before and after.
 
 **Instead of:**
 
@@ -370,14 +396,23 @@ making the decision, not ca-certs.
 |---|---|
 | Distrust AAA Certificate Services | Mozilla blocked the intermediates, not the root, and 10.9's own TLS code may still need AAA for Sectigo's older chains. |
 | Wait for Apple | Apple doesn't update 10.9. |
+| Keep the list by hand | A new OneCRL entry would reach 10.9 only when a person noticed it. |
+| Only entries that chain to a root 10.9 or ca-certs trusts | Still 615 of 786 certificates, so no faster, and it's a judgment of ours on Mozilla's list. |
+| One `add-trusted-cert` per certificate | Installs took 4 minutes and uninstalls 5. |
 
 **What this doesn't cover:**
 
 - **The bundle.** A PEM bundle lists only roots, so programs that read it (OpenSSL, `curl` built on
   it) can't see a blocked intermediate. They're safe from eMudhra's only because Mozilla also
   removed the roots those intermediates chain to.
-- **OneCRL entries named by issuer and serial number alone.** A trust setting needs the certificate,
-  so `blocked.md` lists every certificate published for each entry.
+- **OneCRL entries CCADB has no certificate for.** They can't be distrusted without the
+  certificate. Most are long expired. `blocked.md` counts them and names any Mozilla added in the
+  last year, and names any CCADB certificate it couldn't read, so the gap is visible.
+- **A root ca-certs trusts.** OneCRL blocks a few self-signed certificates. Two are roots 10.9
+  ships: Izenpe.com (2007, SHA-1 `30779E93…`) and Certum Trusted Network CA 2 (2011, SHA-1
+  `3E5D358F…`). Neither is a root ca-certs trusts, so they're distrusted like the rest: Mozilla's
+  decision. A blocked certificate that ca-certs trusts would be a contradiction, and
+  `build/build-bundle.sh` refuses to build with one.
 
-**Reconsider when:** ca-certs reads OneCRL directly, so `blocked.md` is generated rather than kept by
-hand. Until then, a new OneCRL entry reaches ca-certs only when a person adds it.
+**Reconsider when:** OneCRL's or CCADB's format changes, or CCADB stops publishing the
+certificates (PEMs), or a user reports a site that loads in Firefox but not on 10.9.
