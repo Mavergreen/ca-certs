@@ -14,6 +14,7 @@ MAX_REMOVAL = 0.10
 COLUMNS = ('Certificate Subject Common Name', 'Certificate Subject Organization',
            'Certificate Issuer Common Name', 'SHA-256 Fingerprint', 'Valid To [GMT]', 'PEM Info')
 PEM_RE = re.compile(r'-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----', re.S)
+ONECRL_RECORDS = 'https://firefox.settings.services.mozilla.com/v1/buckets/security-state/collections/onecrl/records'
 ENTRIES_FORMAT = '# SHA256 SHA1 ISSUER_DER_BASE64 SERIAL_CONTENT_BASE64, one per blocked.md row, sorted by SHA-256'
 
 
@@ -88,8 +89,14 @@ def bug_number(record):
     return int(m.group(1)) if m else None
 
 
-def bug_link(n):
-    return '[%d](https://bugzilla.mozilla.org/show_bug.cgi?id=%d)' % (n, n)
+def citation(records):
+    """A link to the bug behind the first record, by id, that cites one; else to the first record."""
+    records = sorted(records, key=lambda r: str(r.get('id', '')))
+    for r in records:
+        n = bug_number(r)
+        if n is not None:
+            return '[%d](https://bugzilla.mozilla.org/show_bug.cgi?id=%d)' % (n, n)
+    return '[OneCRL](%s/%s)' % (ONECRL_RECORDS, records[0].get('id', ''))
 
 
 def cell(s):
@@ -132,6 +139,8 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
     records = load_onecrl(onecrl_path)
     reports = [load_ccadb(p) for p in ccadb_paths]
     by_key = {}
+    # spec: no filtering of our own -- Firefox's updateCertBlocklist (RemoteSecuritySettings.sys.mjs)
+    #       enforces every record and never reads `enabled`, so neither does this
     for r in records:
         if 'issuerName' in r and 'serialNumber' in r:
             by_key.setdefault(('serial', r['issuerName'], r['serialNumber']), []).append(r)
@@ -190,7 +199,7 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
         except ValueError:
             continue
         if since <= day <= now:
-            recent.append((created[:10], bug_number(r) or 0, cell(gap_name(r))))
+            recent.append((created[:10], str(r.get('id', '')), citation([r]), cell(gap_name(r))))
     recent.sort()
 
     md = ['# Blocked intermediates', '',
@@ -200,17 +209,16 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
           '[`docs/TRUST-POLICY.md`](docs/TRUST-POLICY.md) #14.', '',
           '**%d certificates.** Each matches a OneCRL entry by its issuer and serial number, or by its' % len(kept),
           'subject and key, and expires after %s. The Bug column cites the Mozilla bug behind that entry,' % now,
-          'or says "none" when the entry cites none.', '',
+          'or the entry itself when it cites no bug.', '',
           '| Intermediate | SHA-256 | Bug | Expires |', '|---|---|---|---|']
     for sha256, c in sorted(kept.items(), key=lambda kv: (kv[1]['name'], kv[0])):
-        bugs = sorted({n for n in map(bug_number, c['hits']) if n is not None})
-        md.append('| %s | `%s` | %s | %d |' % (c['name'], sha256, ', '.join(map(bug_link, bugs)) or 'none', c['until'].year))
+        md.append('| %s | `%s` | %s | %d |' % (c['name'], sha256, citation(c['hits']), c['until'].year))
     md += ['', '## Not matched', '',
            '**%d OneCRL records** name no certificate in CCADB, so this list cannot include them. Most' % len(unmatched),
            'are long-expired certificates CCADB has dropped. Those Mozilla added in the 365 days before %s:' % now, '']
     if recent:
         md += ['| Bug | Name | Added |', '|---|---|---|']
-        md += ['| %s | %s | %s |' % (bug_link(n) if n else 'none', name, day) for day, n, name in recent]
+        md += ['| %s | %s | %s |' % (cite, name, day) for day, _id, cite, name in recent]
     else:
         md.append('None.')
 

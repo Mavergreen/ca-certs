@@ -55,6 +55,7 @@ recs = [by_serial('X', 1111),
         by_serial('Z', 3333)]
 recs += [by_serial(f'V{k}', 6000 + k) for k in range(1, 7)]
 recs[-1]['details']['bug'] = ''
+recs[-2]['details']['bug'] = '6005'
 recs += [dict(by_serial('Z', 3333)) for _ in range(fillers)]
 gap = lambda n, name, created: {'issuerName': b64(b'0\x00'), 'serialNumber': b64(bytes([n % 256])), 'enabled': True,
                                 'details': {'bug': f'https://bugzilla.mozilla.org/show_bug.cgi?id={n}', 'name': name, 'created': created}}
@@ -123,10 +124,17 @@ grep -qx "| Sub X, signed by Test Root | \`$S256_X\` | \[1111\](https://bugzilla
 $(cat "$M")"
 grep -q "^| Pipe/Org, signed by Test Root | \`$S256_Y\` | \[2222\](https://bugzilla.mozilla.org/show_bug.cgi?id=2222) | 2030 |\$" "$M" || fail "Y's row must cite bug 2222"
 grep -q "^| Sub V3, signed by Test Root | \`$S256_V3\` | \[6003\](https://bugzilla.mozilla.org/show_bug.cgi?id=6003) | 2029 |\$" "$M" || fail "V3's row must cite bug 6003"
-grep -q "^| Sub V6, signed by Test Root | \`$S256_V6\` | none | 2029 |\$" "$M" || fail "V6's record cites no bug, so its row must say none"
 grep -q '^| Intermediate | SHA-256 | Bug | Expires |$' "$M" || fail "blocked.md's table header is not | Intermediate | SHA-256 | Bug | Expires |"
 grep -q 'build/onecrl.sh' "$M" && grep -q "$NOW" "$M" && grep -q '2026-10-21' "$M" \
   || fail "blocked.md must say build/onecrl.sh generated it, from OneCRL as of 2026-10-21, on $NOW"
+
+scenario "spells out a bare-number bug"
+grep -q "^| Sub V5, signed by Test Root | \`$S256_V5\` | \[6005\](https://bugzilla.mozilla.org/show_bug.cgi?id=6005) | 2029 |\$" "$M" \
+  || fail "V5's record gives its bug as a bare number, so its row must link it in full"
+
+scenario "cites the record itself when it has no bug"
+grep -q "^| Sub V6, signed by Test Root | \`$S256_V6\` | \[OneCRL\](https://firefox.settings.services.mozilla.com/v1/buckets/security-state/collections/onecrl/records/rec-8) | 2029 |\$" "$M" \
+  || fail "V6's record cites no bug, so its row must link the OneCRL record itself"
 
 scenario "reports the gap"
 grep -q '\*\*2 OneCRL records\*\*' "$M" || fail "blocked.md must count 2 unmatched records:

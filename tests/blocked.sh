@@ -20,8 +20,9 @@ for f in "$R"/blocked/*.pem; do
   printf '%s\n' "$rows" | grep -q "^$s\$" || fail "blocked/$s.pem has no row in blocked.md"
 done
 unbugged="$(sed -n 's/^| \(.*\) | `\([0-9A-F]\{64\}\)` | \(.*\) | [0-9]* |$/\2 \3/p' "$R/blocked.md" \
-  | grep -v ' \[[0-9][0-9]*\](https://bugzilla\.mozilla\.org/show_bug\.cgi?id=[0-9][0-9]*)' || :)"
-[ -z "$unbugged" ] || fail "each blocked.md row must cite the Mozilla bug behind its OneCRL entry; these don't:
+  | grep -v -e ' \[[0-9][0-9]*\](https://bugzilla\.mozilla\.org/show_bug\.cgi?id=[0-9][0-9]*)' \
+            -e ' \[OneCRL\](https://firefox\.settings\.services\.mozilla\.com/v1/buckets/security-state/collections/onecrl/records/[0-9a-z-][0-9a-z-]*)' || :)"
+[ -z "$unbugged" ] || fail "each blocked.md row must cite the Mozilla bug behind its OneCRL entry, or the entry itself; these don't:
 $unbugged"
 
 # spec: build/onecrl.py -- blocked.entries carries each row's SHA-1, issuer and serial for the applier
