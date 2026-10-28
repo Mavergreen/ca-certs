@@ -31,6 +31,23 @@ blocked() {
   printf '%s\n' "$_b"
 }
 batch() { (CA_ROOT="$ROOT"; . "$R/payload/libexec/ca-certs-lib.sh"; ca_admin_batch "$@"); }
+# the same, reading $XML as the admin domain
+batchxml() {
+  (CA_ROOT="$ROOT"; . "$R/payload/libexec/ca-certs-lib.sh"
+   ca_admin_xml() { cat "$XML"; }
+   ca_admin_batch "$@")
+}
+# a 10.9-shaped export of the given entry bodies: "SHA1 BODY_LINES" per argument, \n-separated
+craft() {
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+  printf '<plist version="1.0">\n<dict>\n\t<key>trustList</key>\n\t<dict>\n'
+  for _c in "$@"; do printf '\t\t<key>%s</key>\n%b\n' "${_c%% *}" "${_c#* }"; done
+  printf '\t</dict>\n\t<key>trustVersion</key>\n\t<integer>1</integer>\n</dict>\n</plist>\n'
+}
+DENY='\t\t<dict>\n\t\t\t<key>issuerName</key>\n\t\t\t<data>\n\t\t\tZmFrZQ==\n\t\t\t</data>\n\t\t\t<key>modDate</key>\n\t\t\t<date>2026-10-28T12:00:00Z</date>\n\t\t\t<key>serialNumber</key>\n\t\t\t<data>\n\t\t\tAQ==\n\t\t\t</data>\n\t\t\t<key>trustSettings</key>\n\t\t\t<array>\n\t\t\t\t<dict>\n\t\t\t\t\t<key>kSecTrustSettingsPolicy</key>\n\t\t\t\t\t<data>\n\t\t\t\t\tKoZIhvdjZAED\n\t\t\t\t\t</data>\n\t\t\t\t\t<key>kSecTrustSettingsResult</key>\n\t\t\t\t\t<integer>3</integer>\n\t\t\t\t</dict>\n\t\t\t</array>\n\t\t</dict>'
+E1=1111111111111111111111111111111111111111
+E2=2222222222222222222222222222222222222222
+E3=3333333333333333333333333333333333333333
 # the same, reading a real 10.9 export (tabs, base64 wrapped across lines) as the admin domain
 batch109() {
   (CA_ROOT="$ROOT"; . "$R/payload/libexec/ca-certs-lib.sh"
@@ -50,6 +67,7 @@ entry() {
 without() {  # a plist in XML, less one certificate's entry
   awk -v k="<key>$1</key>" '
     !on && index($0, k) { on = 1; next }
+    on && d == 0 && /<dict\/>/ { on = 0; next }
     on { if ($0 ~ /<dict>/) d++; if ($0 ~ /<\/dict>/ && --d == 0) on = 0; next }
     { print }
   ' "$2"
@@ -169,3 +187,41 @@ entry "$G" "$F109" > "$T/gone"
 [ "$(wc -l < "$T/gone" | tr -d ' ')" -gt 3 ] || fail "test setup: no entry for $G"
 without "$G" "$F109" > "$T/want"
 diff "$T/want" "$SEC/imported.plist" || fail "removing $G must drop exactly its entry (diff above)"
+
+scenario "removes a key whose value is <dict/>, and not the entry after it"
+fresh
+XML="$T/crafted.xml"
+craft "$E1 \t\t<dict/>" "$E2 $DENY" "$E3 $DENY" > "$XML"
+printf '%s\n' "$E1" > "$T/remove"
+batchxml remove "$T/remove" || fail "removing an entry whose value is <dict/> failed"
+without "$E1" "$XML" > "$T/want"
+diff "$T/want" "$SEC/imported.plist" || fail "removing $E1 must drop exactly its entry (diff above)"
+
+scenario "refuses an edit whose key count doesn't add up"
+fresh
+XML="$T/crafted.xml"
+# E1's entry hides a 40-hex key inside it: dropping one entry would drop two keys
+craft "$E1 \t\t<dict>\n\t\t\t<key>$E3</key>\n\t\t\t<string>x</string>\n\t\t</dict>" "$E2 $DENY" > "$XML"
+printf '%s\n' "$E1" > "$T/remove"
+: > "$SEC/log"
+if batchxml remove "$T/remove" 2>"$T/err"; then fail "a mis-counted edit must be refused"; fi
+grep -q "count" "$T/err" || fail "the refusal must name the key count check: $(cat "$T/err")"
+[ "$(calls trust-settings-import)" = 0 ] || fail "nothing may be imported: $(cat "$SEC/log")"
+
+scenario "refuses a malformed entries line before any security call"
+fresh
+preexisting
+X1="$(blocked x1)"
+printf '%s not*base64 AQ==\n' "$X1" >> "$T/entries$n"
+: > "$SEC/log"
+if batch add "$T/entries$n" 2>"$T/err"; then fail "a malformed entries line must be refused"; fi
+grep -q "malformed" "$T/err" || fail "the refusal must say the line is malformed: $(cat "$T/err")"
+[ ! -s "$SEC/log" ] || fail "no security call may come before the entries are checked: $(cat "$SEC/log")"
+
+scenario "refuses when it cannot make a temporary file"
+fresh
+X1="$(blocked x1)"
+: > "$SEC/log"
+if TMPDIR="$T/nonexistent" batch add "$T/entries$n" 2>"$T/err"; then fail "a failed mktemp must fail the batch"; fi
+grep -q "temporary file" "$T/err" || fail "the failure must name the temporary file: $(cat "$T/err")"
+[ ! -s "$SEC/log" ] || fail "nothing may change without the temporary file: $(cat "$SEC/log")"

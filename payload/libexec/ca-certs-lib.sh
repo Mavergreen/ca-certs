@@ -296,29 +296,33 @@ ca_admin_batch() {
     $1 !~ /^[0-9A-F]+$/ || length($1) != 40 { exit 1 }
   ' "$_bin" || ca_die "could not read $_bin, or a line of it is malformed; changed nothing"
 
-  _bx="$(ca_admin_xml)" || exit 1
+  _btm=""; _bsrc=""; _bout=""; _bcnt=""
+  _bclean() { rm -f "$_btm" "$_bsrc" "$_bout" "$_bcnt"; }
+  _bmk() { mktemp "${TMPDIR:-/tmp}/ca-certs-$1.XXXXXX" || { _bclean; ca_die "could not make a temporary file for $2; changed nothing"; }; }
+  _btm="$(_bmk template "the entry to copy")" || exit 1
+  _bsrc="$(_bmk admin-src "the admin trust settings to edit")" || exit 1
+  _bout="$(_bmk admin-new "the edited admin trust settings")" || exit 1
+  _bcnt="$(_bmk admin-count "the edit's counts")" || exit 1
+
+  _bx="$(ca_admin_xml)" || { _bclean; exit 1; }
   [ -n "$_bx" ] || _bx="$CA_ADMIN_EMPTY_XML"
-  _btm="$(mktemp "${TMPDIR:-/tmp}/ca-certs-template.XXXXXX")"
   if [ "$_bop" = add ]; then
-    printf '%s\n' "$_bx" | ca_admin_template > "$_btm" || { rm -f "$_btm"; ca_die "could not read the admin trust settings for a TLS denial to copy"; }
+    printf '%s\n' "$_bx" | ca_admin_template > "$_btm" || { _bclean; ca_die "could not read the admin trust settings for a TLS denial to copy"; }
     if [ ! -s "$_btm" ]; then
       _bk="$(printf '%s\n' "$_bx" | sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p')"
       _bf=""
       for _bs in $(awk 'NF { print $1 }' "$_bin"); do ca_in "$_bs" "$_bk" || { _bf="$_bs"; break; }; done
-      [ -n "$_bf" ] || { rm -f "$_btm"; return 0; }
+      [ -n "$_bf" ] || { _bclean; return 0; }
       "$SECURITY" add-trusted-cert -d -r deny -p ssl "$CA_TREE/share/ca-certs/blocked/$_bf.pem" \
-        || { rm -f "$_btm"; ca_die "could not deny $_bf for TLS, the entry the rest are copied from"; }
-      _bx="$(ca_admin_xml)" || { rm -f "$_btm"; exit 1; }
-      printf '%s\n' "$_bx" | ca_admin_template > "$_btm" || { rm -f "$_btm"; ca_die "could not read the admin trust settings for a TLS denial to copy"; }
-      [ -s "$_btm" ] || { rm -f "$_btm"; ca_die "security reported denying $_bf for TLS but the admin trust settings hold no such entry to copy"; }
+        || { _bclean; ca_die "could not deny $_bf for TLS, the entry the rest are copied from"; }
+      _bx="$(ca_admin_xml)" || { _bclean; exit 1; }
+      printf '%s\n' "$_bx" | ca_admin_template > "$_btm" || { _bclean; ca_die "could not read the admin trust settings for a TLS denial to copy"; }
+      [ -s "$_btm" ] || { _bclean; ca_die "security reported denying $_bf for TLS but the admin trust settings hold no such entry to copy"; }
     fi
   fi
 
-  _bsrc="$(mktemp "${TMPDIR:-/tmp}/ca-certs-admin-src.XXXXXX")"
-  _bout="$(mktemp "${TMPDIR:-/tmp}/ca-certs-admin-new.XXXXXX")"
-  _bclean() { rm -f "$_btm" "$_bsrc" "$_bout"; }
   printf '%s\n' "$_bx" > "$_bsrc" || { _bclean; ca_die "could not write the admin trust settings to edit"; }
-  awk -v op="$_bop" -v tmpl="$_btm" -v list="$_bin" '
+  awk -v op="$_bop" -v tmpl="$_btm" -v list="$_bin" -v cnt="$_bcnt" '
     function keyof(s) { sub(/.*<key>/, "", s); sub(/<\/key>.*/, "", s); return s }
     function issha(s) { return s ~ /^[0-9A-F]+$/ && length(s) == 40 }
     BEGIN {
@@ -333,7 +337,7 @@ ca_admin_batch() {
     function emit(   i, j, td, sw, ind, x) {
       for (i = 1; i <= n; i++) {
         if (sha[i] in present) continue
-        present[sha[i]] = 1
+        present[sha[i]] = 1; emitted++
         x = t[1]; sub(/<key>[0-9A-F]+<\/key>/, "<key>" sha[i] "</key>", x); print x
         td = 0; sw = ""
         for (j = 2; j <= tn; j++) {
@@ -351,10 +355,11 @@ ca_admin_batch() {
     }
     {
       line = $0; isopen = (line ~ /<dict>/); isclose = (line ~ /<\/dict>/)
-      if (skip) { if (isopen) d++; if (isclose && --d == 2) skip = 0; next }
+      # the dropped value ends back at the depth it began: after its </dict>, or at once for <dict/>
+      if (skip) { if (isopen) d++; else if (isclose) d--; if (d == 2) skip = 0; next }
       if (d == 2 && tl && line ~ /<key>/ && issha(keyof(line))) {
         k = keyof(line); present[k] = 1
-        if (k in drop) { skip = 1; next }
+        if (k in drop) { skip = 1; dropped++; next }
       }
       if (d == 1 && line ~ /<key>trustList<\/key>/) wanttl = 1
       if (d == 1 && wanttl && line ~ /<dict\/>/) {
@@ -364,7 +369,38 @@ ca_admin_batch() {
       if (isclose) { if (d == 2 && tl) { emit(); tl = 0 }; d-- }
       print line
     }
+    END { print emitted + 0, dropped + 0 > cnt }
   ' "$_bsrc" > "$_bout" || { _bclean; ca_die "could not edit the admin trust settings; changed nothing"; }
+  # spec: docs/TRUST-POLICY.md #8 -- the import replaces the whole domain, so the edit must account
+  #       for every key: as many as before, plus each one added, less each one removed; every
+  #       requested absent entry added, every requested present entry gone
+  _bmsg="$(awk -v op="$_bop" -v src="$_bsrc" -v out="$_bout" -v list="$_bin" -v cnt="$_bcnt" '
+    # each file is read in a loop of its own, not one function taking an array: the oldest
+    # one-true-awk may not make an array of an untyped argument
+    BEGIN {
+      while ((getline l < src) > 0) {
+        if (l !~ /<key>[0-9A-F]+<\/key>/) continue
+        k = l; sub(/.*<key>/, "", k); sub(/<\/key>.*/, "", k)
+        if (length(k) == 40) { was[k] = 1; nin++ }
+      }
+      while ((getline l < out) > 0) {
+        if (l !~ /<key>[0-9A-F]+<\/key>/) continue
+        k = l; sub(/.*<key>/, "", k); sub(/<\/key>.*/, "", k)
+        if (length(k) == 40) { now[k] = 1; nout++ }
+      }
+      nin += 0; nout += 0
+      if ((getline c < cnt) <= 0 || split(c, e, " ") != 2) { print "the edit reported no counts"; exit 1 }
+      if (nout != nin + e[1] - e[2]) { print "it holds " nout " keys, not " nin " + " e[1] " added - " e[2] " removed"; exit 1 }
+      while ((getline l < list) > 0) {
+        if (split(l, f, " ") == 0 || (f[1] in seen)) continue
+        seen[f[1]] = 1
+        if (op == "add" && !(f[1] in was)) { want++; if (!(f[1] in now)) { print f[1] " was not added"; exit 1 } }
+        if (op == "remove" && (f[1] in was)) { want++; if (f[1] in now) { print f[1] " was not removed"; exit 1 } }
+      }
+      if (op == "add" && e[1] != want + 0) { print e[1] " added, not " want + 0; exit 1 }
+      if (op == "remove" && e[2] != want + 0) { print e[2] " removed, not " want + 0; exit 1 }
+    }
+  ')" || { _bclean; ca_die "the key count check refused the edited admin trust settings: $_bmsg; changed nothing"; }
   if cmp -s "$_bsrc" "$_bout"; then _bclean; return 0; fi
   plutil -lint "$_bout" >/dev/null || { _bclean; ca_die "the edited admin trust settings are not a valid property list; changed nothing"; }
   "$SECURITY" trust-settings-import -d "$_bout" || { _bclean; ca_die "could not import the edited admin trust settings"; }
