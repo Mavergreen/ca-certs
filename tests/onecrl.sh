@@ -72,13 +72,19 @@ def row(c, cn, org, until):
             'Certificate Subject Common Name': cn, 'Certificate Subject Organization': org,
             'SHA-256 Fingerprint': fp.split('=')[1].strip().replace(':', ''), 'Valid To [GMT]': until,
             'PEM Info': "'" + open(f'{T}/{c}.pem').read().strip() + "'"}
+def rewrap(r):
+    body = ''.join(r['PEM Info'].strip("'").splitlines()[1:-1])
+    lines = ['-----BEGIN CERTIFICATE-----'] + [body[i:i + 40] for i in range(0, len(body), 40)] + ['-----END CERTIFICATE-----']
+    return dict(r, **{'PEM Info': "'" + '\r\n'.join(lines) + "'"})
 def write(name, header, rows):
     with open(f'{T}/{name}', 'w', newline='') as f:
         w = csv.DictWriter(f, header, quoting=csv.QUOTE_ALL, restval=''); w.writeheader(); w.writerows(rows)
 write('revoked.csv', REVOKED, [row('X', 'Sub X', 'Test Org', '2031 Mar 15'), row('Z', 'Sub Z', 'Test Org', '2020 Jan 01')])
 write('all.csv', ALL, [row('X', 'Sub X', 'Test Org', '2031 Mar 15'), row('Y', '', 'Pipe|Org', '2030 Jan 01'),
                        row('W', 'Sub W', 'Test Org', '2030 Jan 01')]
-                      + [row(f'V{k}', f'Sub V{k}', 'Filler Org', '2029 Jun 30') for k in range(1, 4)]
+                      # spec: build/onecrl.py pem_der -- CCADB wraps V1's PEM at 40 columns with CRLFs; blocked/ gets it in 64
+                      + [rewrap(row('V1', 'Sub V1', 'Filler Org', '2029 Jun 30'))]
+                      + [row(f'V{k}', f'Sub V{k}', 'Filler Org', '2029 Jun 30') for k in range(2, 4)]
                       # spec: build/onecrl.py -- CCADB gives V4's issuer no CN, so its row names the issuer's O
                       + [dict(row('V4', 'Sub V4', 'Filler Org', '2029 Jun 30'), **{'Certificate Issuer Common Name': ''})]
                       + [row(f'V{k}', f'Sub V{k}', 'Filler Org', '2029 Jun 30') for k in range(5, 7)])
@@ -115,6 +121,13 @@ scenario "matches by subject and key"
 grep -q "^$S256_Y $S1_Y " "$E" || fail "blocked.entries lacks Y"
 grep -q "^| Pipe/Org, signed by Test Root | \`$S256_Y\` | " "$M" || fail "Y's row must name its subject's O, its pipe a slash:
 $(cat "$M")"
+
+scenario "writes each PEM re-encoded from its DER, 64 columns, whatever CCADB's wrapping"
+for c in X Y V1 V2 V3 V4 V5 V6; do
+  eval "s=\$S256_$c"
+  cmp -s "$T/$c.pem" "$T/repo/blocked/$s.pem" || fail "blocked/$s.pem ($c) is not the canonical PEM openssl writes:
+$(cat "$T/repo/blocked/$s.pem")"
+done
 
 scenario "drops expired and unlisted"
 for c in Z W; do
@@ -174,6 +187,37 @@ mkdir "$T/touched"
 python3 -I "$G" --onecrl "$T/touched.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --now "$NOW" --repo "$T/touched" >/dev/null 2>&1 \
   || fail "a run on a re-stamped OneCRL failed"
 diff -r "$T/before" "$T/touched" || fail "OneCRL's last_modified alone changed the output"
+
+# spec: docs/TRUST-POLICY.md #14 -- time-driven changes alone (a certificate expiring, a gap entry aging past
+#       365 days) leave the committed files alone; the next real change sweeps them up
+scenario "leaves the committed files alone when only time has passed"
+cp -R "$T/before" "$T/aged"
+gen "$T/aged" --now 2027-10-01 > "$T/out" 2>&1 || fail "a run with a gap entry aged past 365 days failed: $(cat "$T/out")"
+diff -r "$T/before" "$T/aged" || fail "a gap entry aging past 365 days, and nothing else, changed the committed files"
+cp -R "$T/before" "$T/expired"
+python3 -I "$G" --onecrl "$T/onecrl.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --now 2029-07-01 --repo "$T/expired" > "$T/out" 2>&1 \
+  || fail "a run with six certificates expired and a gap entry aged out failed: $(cat "$T/out")"
+diff -r "$T/before" "$T/expired" || fail "certificates expiring and a gap entry aging out, and nothing else, changed the committed files"
+
+scenario "sweeps the time-driven changes with the next real one"
+read -r _ wiss wser <<EOF
+$(grep '^W ' "$T/der")
+EOF
+python3 -I - "$T/onecrl.json" "$T/plusw.json" "$wiss" "$wser" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d['data'].append({'id': 'rec-w', 'last_modified': 1, 'issuerName': sys.argv[3], 'serialNumber': sys.argv[4], 'enabled': True,
+                  'details': {'bug': 'https://bugzilla.mozilla.org/show_bug.cgi?id=7777', 'created': '2029-06-01T00:00:00Z'}})
+json.dump(d, open(sys.argv[2], 'w'))
+PY
+cp -R "$T/before" "$T/swept"
+python3 -I "$G" --onecrl "$T/plusw.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --now 2029-07-01 --repo "$T/swept" --allow-mass-removal \
+  > "$T/out" 2>&1 || fail "a run with a new block and six expiries failed: $(cat "$T/out")"
+[ "$(ls "$T/swept/blocked" | LC_ALL=C sort | tr '\n' ' ')" = "$(printf '%s.pem\n' "$S256_X" "$S256_Y" "$S256_W" | LC_ALL=C sort | tr '\n' ' ')" ] \
+  || fail "a new block must bring in W and sweep out the six expired V certificates: $(ls "$T/swept/blocked")"
+grep -q "$S256_W" "$T/swept/blocked.md" && grep -q "$S256_W" "$T/swept/blocked.entries" || fail "the new block's row or entry is missing"
+! grep -q "$S256_V1" "$T/swept/blocked.md" "$T/swept/blocked.entries" || fail "the expired V1 is still listed after a real change"
+! grep -q 'Recent Gap CA' "$T/swept/blocked.md" || fail "the gap entry aged past 365 days is still listed after a real change"
 
 scenario "guards"
 refuses() {  # REPO WHY ARG...: the generator exits 1 naming WHY and leaves REPO as it was

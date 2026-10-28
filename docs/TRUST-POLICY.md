@@ -374,7 +374,9 @@ generator matches OneCRL against CCADB's reports of intermediates, which carry e
 refuses, and changes nothing, when OneCRL has fewer than 1,000 records, when a download is empty or
 doesn't parse, or when a run would remove more than 10% of `blocked/` at once. OneCRL entries leave
 only when their certificates expire, so a large removal means bad input. A real one goes through a
-manual run of `onecrl.yml` that allows it.
+manual run of `onecrl.yml` that allows it. Time alone cuts no release: when the only differences are
+certificates expiring or gap entries turning a year old, the files stay as they are, and expired
+entries are swept with the next real change.
 
 **Cost, measured on 10.9 (2026-10-28, 774 certificates):**
 
