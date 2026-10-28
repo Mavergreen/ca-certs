@@ -25,7 +25,7 @@ first="$(sh "$R/build/roots-notes.sh" "$T/cur")"
 printf '%s\n' "$first" | grep -q '^- Trusts 2 roots, distrusts 1, and blocks 0 intermediates\.$' || fail "a first release must give the counts: $first"
 [ "$(printf '%s\n' "$first" | head -n 1)" = "" ] || fail "the section must start with a blank line, or Sparkle's dialog runs it into the previous paragraph"
 
-# blocked intermediates: counts, and names only when the change is small
+# spec: docs/TRUST-POLICY.md #11 -- blocked intermediates: counts, and names only when the change is small
 gen() {  # $1=count, $2=prefix: that many blocked lines, each with a distinct 64-hex id
   awk -v n="$1" -v p="$2" 'BEGIN { for (i = 1; i <= n; i++) printf "blocked %s%s Blocked CA %d\n", p, sprintf("%063d", i), i }'
 }

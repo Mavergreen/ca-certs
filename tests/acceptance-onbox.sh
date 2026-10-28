@@ -49,7 +49,7 @@ probe_cert() {  # HOST: fail only when curl cannot verify the certificate (exit 
   [ "$_rc" -eq 0 ] || echo "note: $1 does not answer over TLS from here (curl exit $_rc)"
 }
 snap() {
-  # the export, not dump-trust-settings: the dump omits admin entries whose certificate is in no keychain (every blocked one)
+  # platform: the dump omits admin entries whose certificate is in no keychain (every blocked one), so this reads the export, not dump-trust-settings
   : > "$1.admin.xml"
   if security trust-settings-export -d "$1.admin.plist" >/dev/null 2>&1; then plutil -convert xml1 -o - "$1.admin.plist" | awk '/<key>modDate<\/key>/ { skip = 1; next } skip { skip = 0; next } { print }' > "$1.admin.xml" || : > "$1.admin.xml"; fi  # modDate lines dropped: an import may rewrite dates of entries it carries through
   sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p' "$1.admin.xml" | LC_ALL=C sort > "$1.admin"
@@ -114,7 +114,7 @@ check_blocked() {  # LABEL RELEASE: every shipped blocked intermediate is denied
   _first="$(ls "$_bd"/*.pem | head -1)"
   security verify-cert -c "$_first" -p ssl -L > "$T/blocked.verify" 2>&1 || :
   grep -q kSecTrustResultDeny "$T/blocked.verify" || fail "after the $1, $_first does not verify as kSecTrustResultDeny: $(cat "$T/blocked.verify")"
-  # the installer must not have imported any of them into System.keychain or the login/default keychain
+  # spec: docs/TRUST-POLICY.md #14 -- the installer must not have imported any of them into System.keychain or the login/default keychain
   { security find-certificate -a -Z /Library/Keychains/System.keychain 2>/dev/null || :; security find-certificate -a -Z 2>/dev/null || :; } \
     | sed -n 's/^SHA-1 hash: //p' | LC_ALL=C sort -u > "$T/blocked.kc"
   [ -s "$T/blocked.kc" ] || fail "after the $1, the keychain lookup listed no certificates at all (System.keychain always holds some), so it cannot show the blocked ones are absent"
@@ -172,7 +172,7 @@ expect_installed "$label" new
 for h in good.sca1a.amazontrust.com good.sca2a.amazontrust.com good.sca3a.amazontrust.com good.sca4a.amazontrust.com www.google.com www.apple.com github.com; do
   [ "$(probe "$h")" = 200 ] || echo "note: $h does not answer over TLS from here (the network, or this system's TLS)"
 done
-# anchor twins: OneCRL blocks the 10.9-shipped Certum Trusted Network CA 2, but ca-certs trusts a newer copy with the same name and key
+# spec: docs/TRUST-POLICY.md #14 -- anchor twins: OneCRL blocks the 10.9-shipped Certum Trusted Network CA 2, but ca-certs trusts a newer copy with the same name and key
 for h in www.certum.pl www.identrust.com; do probe_cert "$h"; done
 
 cp "$RECEIPT" "$T/receipt1"

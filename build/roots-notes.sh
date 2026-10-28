@@ -44,7 +44,7 @@ section() {
   group trusted "$T/removed" "No longer trusted" "$prev"
   group distrusted "$T/added" "Newly distrusted" "$cur"
   group distrusted "$T/removed" "No longer distrusted" "$prev"
-  # Blocked intermediates number in the hundreds: counts, and names only for a small change.
+  # spec: docs/TRUST-POLICY.md #11 -- Blocked intermediates number in the hundreds: counts, and names only for a small change.
   nb_add="$(grep -c '^blocked ' "$T/added" || :)"; nb_rem="$(grep -c '^blocked ' "$T/removed" || :)"
   [ "$nb_add" = 0 ] || printf -- '- Newly blocks %s intermediates Mozilla blocks in OneCRL.\n' "$nb_add"
   [ "$nb_rem" = 0 ] || printf -- '- No longer blocks %s (expired or unblocked).\n' "$nb_rem"

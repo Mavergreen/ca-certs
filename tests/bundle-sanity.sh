@@ -17,7 +17,7 @@ for f in "$D"/trusted/*.pem "$D"/distrust/*.pem; do
   s="$(openssl x509 -noout -fingerprint -sha1 -in "$f" | sed 's/.*=//' | tr -d :)" || fail "$f does not parse"
   [ "$(basename "$f" .pem)" = "$s" ] || fail "$f is named for another certificate (its SHA-1 is $s)"
 done
-# blocked intermediates ship apart from withdrawn roots: blocked/, never distrust/
+# spec: docs/TRUST-POLICY.md #14 -- blocked intermediates ship apart from withdrawn roots: blocked/, never distrust/
 for f in "$R"/blocked/*.pem; do
   s="$(openssl x509 -noout -fingerprint -sha1 -in "$f" | sed 's/.*=//' | tr -d :)" || fail "$f does not parse"
   [ -f "$D/blocked/$s.pem" ] || fail "blocked/$(basename "$f") is not in this release's blocked/"

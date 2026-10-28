@@ -151,7 +151,7 @@ ca_undo_import() {
   if ca_in "$1" "$_kc"; then ca_die "security reported deleting $1 but it is still in $CA_KC"; fi
 }
 
-# the lines of FILE whose first field is (in) or is not (out) one of the lines of SET
+# spec: docs/TRUST-POLICY.md #9 -- the lines of FILE whose first field is (in) or is not (out) one of the lines of SET
 sift() {
   awk -v mode="$1" -v set="$3" '
     BEGIN { while ((g = (getline l < set)) > 0) s[l] = 1; if (g < 0) exit 2 }
@@ -173,7 +173,7 @@ ca_retire_blocked() {
   sift in "$_rg" "$_rw/admin" > "$_rw/remove"
   _rrc=0
   if [ -s "$_rw/remove" ]; then
-    # ca_admin_batch dies on any failure; the subshell keeps this run to check what it left behind
+    # spec: docs/TRUST-POLICY.md #9 -- ca_admin_batch dies on any failure; the subshell keeps this run to check what it left behind
     set +e
     (set -e; ca_admin_batch remove "$_rw/remove")
     _rrc=$?
@@ -352,7 +352,7 @@ CA_ADMIN_EMPTY_XML='<?xml version="1.0" encoding="UTF-8"?>
 ca_admin_batch() {
   _bop="$1"; _bin="$2"
   case "$_bop" in add|remove) ;; *) ca_die "ca_admin_batch: unknown operation '$_bop'" ;; esac
-  # spec: every line is checked before any of it reaches a path or the XML
+  # spec: docs/TRUST-POLICY.md #9 -- every line is checked before any of it reaches a path or the XML
   awk -v op="$_bop" '
     !NF { next }
     op == "add" && (NF != 3 || $2 !~ /^[A-Za-z0-9+\/]+=*$/ || $3 !~ /^[A-Za-z0-9+\/]+=*$/) { exit 1 }
@@ -397,7 +397,7 @@ ca_admin_batch() {
       }
       if (op == "add") while ((getline l < tmpl) > 0) t[++tn] = l
     }
-    # one copy of the template per entry not already in the domain, with its own key, issuer and serial
+    # spec: docs/TRUST-POLICY.md #9 -- one copy of the template per entry not already in the domain, with its own key, issuer and serial
     function emit(   i, j, td, sw, ind, x) {
       for (i = 1; i <= n; i++) {
         if (sha[i] in present) continue
@@ -419,7 +419,7 @@ ca_admin_batch() {
     }
     {
       line = $0; isopen = (line ~ /<dict>/); isclose = (line ~ /<\/dict>/)
-      # the dropped value ends back at the depth it began: after its </dict>, or at once for <dict/>
+      # spec: docs/TRUST-POLICY.md #9 -- the dropped value ends back at the depth it began: after its </dict>, or at once for <dict/>
       if (skip) { if (isopen) d++; else if (isclose) d--; if (d == 2) skip = 0; next }
       if (d == 2 && tl && line ~ /<key>/ && issha(keyof(line))) {
         k = keyof(line); present[k] = 1
@@ -439,8 +439,8 @@ ca_admin_batch() {
   #       for every key: as many as before, plus each one added, less each one removed; every
   #       requested absent entry added, every requested present entry gone
   _bmsg="$(awk -v op="$_bop" -v src="$_bsrc" -v out="$_bout" -v list="$_bin" -v cnt="$_bcnt" '
-    # each file is read in a loop of its own, not one function taking an array: the oldest
-    # one-true-awk may not make an array of an untyped argument
+    # platform: the oldest one-true-awk may not make an array of an untyped argument, so each file
+    #           is read in a loop of its own, not one function taking an array
     BEGIN {
       while ((getline l < src) > 0) {
         if (l !~ /<key>[0-9A-F]+<\/key>/) continue

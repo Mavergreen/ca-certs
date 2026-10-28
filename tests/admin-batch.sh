@@ -22,8 +22,8 @@ fresh() {
   unset FAKE_SEC_FAIL_IMPORT
   : > "$T/entries$n"
 }
-# A blocked certificate in share/ca-certs/blocked, and its line in the entries file:
-# made-up issuer and serial base64, unique per certificate, so the import shows where each landed
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- A blocked certificate in share/ca-certs/blocked, and its line in the entries file:
+#       made-up issuer and serial base64, unique per certificate, so the import shows where each landed
 b64() { printf '%s' "$1" | base64; }
 blocked() {
   _b="$(mkcert "$1" "$BLK")"
@@ -31,13 +31,13 @@ blocked() {
   printf '%s\n' "$_b"
 }
 batch() { (CA_ROOT="$ROOT"; . "$R/payload/libexec/ca-certs-lib.sh"; ca_admin_batch "$@"); }
-# the same, reading $XML as the admin domain
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- the same, reading $XML as the admin domain
 batchxml() {
   (CA_ROOT="$ROOT"; . "$R/payload/libexec/ca-certs-lib.sh"
    ca_admin_xml() { cat "$XML"; }
    ca_admin_batch "$@")
 }
-# a 10.9-shaped export of the given entry bodies: "SHA1 BODY_LINES" per argument, \n-separated
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- a 10.9-shaped export of the given entry bodies: "SHA1 BODY_LINES" per argument, \n-separated
 craft() {
   printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
   printf '<plist version="1.0">\n<dict>\n\t<key>trustList</key>\n\t<dict>\n'
@@ -48,7 +48,7 @@ DENY='\t\t<dict>\n\t\t\t<key>issuerName</key>\n\t\t\t<data>\n\t\t\tZmFrZQ==\n\t\
 E1=1111111111111111111111111111111111111111
 E2=2222222222222222222222222222222222222222
 E3=3333333333333333333333333333333333333333
-# the same, reading a real 10.9 export (tabs, base64 wrapped across lines) as the admin domain
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- the same, reading a real 10.9 export (tabs, base64 wrapped across lines) as the admin domain
 batch109() {
   (CA_ROOT="$ROOT"; . "$R/payload/libexec/ca-certs-lib.sh"
    ca_admin_xml() { cat "$R/tests/fixtures/admin-trust-settings-10.9.xml"; }
@@ -57,7 +57,7 @@ batch109() {
 denied_ssl() { grep -q "^$1 deny ssl\$" "$SEC/admin" || fail "$1 must be denied for TLS: $(cat "$SEC/admin")"; }
 absent() { if grep -q "^$1 " "$SEC/admin"; then fail "$1 must have no admin setting: $(cat "$SEC/admin")"; fi; }
 calls() { grep -c "^$1" "$SEC/log" || :; }
-# one certificate's entry -- its key line through its whole nested <dict> -- from a plist in XML
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- one certificate's entry -- its key line through its whole nested <dict> -- from a plist in XML
 entry() {
   awk -v k="<key>$1</key>" '
     !on && index($0, k) { on = 1; print; next }
@@ -72,7 +72,7 @@ without() {  # a plist in XML, less one certificate's entry
     { print }
   ' "$2"
 }
-# one field of the entry in $T/got, whitespace stripped, as "<key>K</key> <data> B64 </data> "
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- one field of the entry in $T/got, whitespace stripped, as "<key>K</key> <data> B64 </data> "
 field() { grep -A3 "<key>$1</key>" "$T/got" | tr '\n' ' '; }
 preexisting() {  # the user's own: P trusted for every use, Q denied for S/MIME
   P="$(mkcert p "$TREE/share/ca-certs/trusted")"
@@ -97,7 +97,7 @@ scenario "keeps every other entry byte for byte"
 fresh
 preexisting
 X1="$(blocked x1)"; X2="$(blocked x2)"; X3="$(blocked x3)"
-# what the batch reads: the export through plutil xml1, which on modern macOS rewraps <data>
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- what the batch reads: the export through plutil xml1, which on modern macOS rewraps <data>
 "$SECURITY" trust-settings-export -d "$T/export.plist"
 plutil -convert xml1 -o "$T/before.xml" "$T/export.plist"
 batch add "$T/entries$n" || fail "adding next to the user's settings failed"
@@ -133,7 +133,7 @@ denied_ssl "$X1"; denied_ssl "$X2"
 scenario "refuses a failed import"
 fresh
 preexisting
-# the user's own TLS denial of U is a template already, so no add-trusted-cert comes first
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- the user's own TLS denial of U is a template already, so no add-trusted-cert comes first
 U="$(mkcert u "$TREE/share/ca-certs/distrust")"
 "$SECURITY" add-trusted-cert -d -r deny -p ssl -k kc "$TREE/share/ca-certs/distrust/$U.pem"
 X1="$(blocked x1)"; X2="$(blocked x2)"
@@ -200,7 +200,7 @@ diff "$T/want" "$SEC/imported.plist" || fail "removing $E1 must drop exactly its
 scenario "refuses an edit whose key count doesn't add up"
 fresh
 XML="$T/crafted.xml"
-# E1's entry hides a 40-hex key inside it: dropping one entry would drop two keys
+# spec: payload/libexec/ca-certs-lib.sh ca_admin_batch -- E1's entry hides a 40-hex key inside it: dropping one entry would drop two keys
 craft "$E1 \t\t<dict>\n\t\t\t<key>$E3</key>\n\t\t\t<string>x</string>\n\t\t</dict>" "$E2 $DENY" > "$XML"
 printf '%s\n' "$E1" > "$T/remove"
 : > "$SEC/log"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# platform: CI-only -- python3
+# platform: host-agnostic -- CI-only: python3
 #   usage: onecrl.sh [--allow-mass-removal]
 #          Downloads OneCRL and CCADB's two intermediate reports, then regenerates blocked.md,
 #          blocked/ and blocked.entries from them with onecrl.py, as of today in UTC. Exits 1,

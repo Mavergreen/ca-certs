@@ -35,8 +35,8 @@ for c in "$D"/split/*.pem; do
   printf '%s\n' "$s1" >> "$D/ca-certificates.sha1"
   printf 'trusted %s %s\n' "$s256" "$(cat "$c.label")" >> "$D/roots.unsorted"
 done
-# withdrawn roots are distrusted by the applier; blocked intermediates by issuer and serial. Both
-# are refused if Mozilla trusts them.
+# spec: docs/TRUST-POLICY.md #14 -- withdrawn roots are distrusted by the applier; blocked intermediates by issuer and serial. Both
+#       are refused if Mozilla trusts them.
 for list in withdrawn blocked; do
   sed -n 's/^| \(.*\) | `\([0-9A-F]\{64\}\)` | .*/\2 \1/p' "$MAVERICKS_ROOT/$list.md" > "$D/$list.rows"
   [ -s "$D/$list.rows" ] || build_die "$list.md lists nothing"
@@ -51,7 +51,7 @@ for list in withdrawn blocked; do
     [ "$list" != blocked ] || printf '%s %s\n' "$s256" "$s1" >> "$D/blocked.sha1s"
   done < "$D/$list.rows"
 done
-# blocked.entries: SHA1 ISSUER_B64 SERIAL_B64, from the committed SHA256-keyed list
+# spec: docs/TRUST-POLICY.md #14 -- blocked.entries: SHA1 ISSUER_B64 SERIAL_B64, from the committed SHA256-keyed list
 awk 'NR == FNR { sha1[$1] = $2; next }
      /^#/ || NF == 0 { next }
      !($1 in sha1) { print "blocked.entries has no blocked.md row for " $1 > "/dev/stderr"; bad = 1; next }
