@@ -6,13 +6,19 @@ name: onecrl
 #       - generate (contents: read) downloads OneCRL and CCADB and runs the generator. Upstream's bytes are
 #         read there, never beside a token that can write. A tripped guard (too few records, a bad download,
 #         a mass removal) fails this job, so a red scheduled run is the alarm, and nothing reaches propose.
-#       - propose reads no upstream byte: it lays generate's artifact over main, commits it to onecrl/update
+#         A changed list is then checked as the PR's build would check it (tests/blocked.sh, and
+#         build/build-bundle.sh's refusals), so content the PR could never merge turns this run red too.
+#       - propose reads no upstream byte and runs no repo code. When the list equals main, it closes any
+#         open onecrl/update PR, so stale content can't merge later. Otherwise it lays generate's artifact
+#         over main, commits it to onecrl/update
 #         as the Mavergreen pins-bot GitHub App (org variable PINS_BOT_CLIENT_ID, org secret
 #         PINS_BOT_PRIVATE_KEY; minted here with contents and pull-requests write alone), and opens or
 #         updates the PR with automerge. A push or PR made with GITHUB_TOKEN starts no workflow; the App's
 #         PR starts release.yml like any PR, and that run's required checks (the build, tests/blocked.sh
 #         among them, and the 10.9 job) gate the automerge. The merge moves the declared state, and
 #         reconcile.yml cuts the release.
+#       An open onecrl/update PR created more than 2 days ago fails propose, naming it, every day until it
+#       merges or closes: a PR whose checks went red must not stall silently.
 #       A real mass removal (OneCRL entries leave only when they expire) goes through workflow_dispatch with
 #       allow_mass_removal, the only way past that guard.
 
@@ -70,6 +76,16 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # spec: release.yml's build -- the PR runs these, and a list they refuse would sit unmerged; refusing it
+      #       here makes the scheduled run red the day it happens. Only on a change: main has passed them.
+      - name: Check the new list as the PR's build would
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          set -eu
+          sh tests/blocked.sh
+          sh build/build-bundle.sh
+          sh tests/bundle-sanity.sh
+
       - uses: actions/upload-artifact@v7
         if: steps.diff.outputs.changed == 'true'
         with:
@@ -81,9 +97,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # spec: .github/workflows/onecrl.yml -- this runs when nothing changed too: a stale PR is closed then
   propose:
     needs: generate
-    if: needs.generate.outputs.changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -102,6 +118,7 @@ jobs:
       #       because the `git push` below authenticates with them: persisting none, as generate does,
       #       would break the push, not harden it.
       - uses: actions/checkout@v7
+        if: needs.generate.outputs.changed == 'true'
         with:
           ref: main
           token: ${{ steps.app.outputs.token }}
@@ -109,15 +126,18 @@ jobs:
       # spec: build/onecrl.py write_all -- blocked/ is emptied first, so a certificate the generator
       #       dropped is gone, not left behind.
       - name: Clear blocked/ for the generated one
+        if: needs.generate.outputs.changed == 'true'
         run: rm -rf blocked
 
       - uses: actions/download-artifact@v8
+        if: needs.generate.outputs.changed == 'true'
         with:
           name: onecrl
           path: .
 
       - name: Commit to onecrl/update, as the App, from main
         id: commit
+        if: needs.generate.outputs.changed == 'true'
         run: |
           set -eu
           git checkout -q -B onecrl/update
@@ -157,3 +177,29 @@ jobs:
             gh pr create --base main --head onecrl/update --title "$title" --body "$body"
           fi
           gh pr merge onecrl/update --auto --squash
+
+      - name: Close a stale pull request when main already holds the list
+        if: needs.generate.outputs.changed != 'true' || steps.commit.outputs.committed != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          for pr in $(gh pr list --head onecrl/update --base main --state open --json number --jq '.[].number'); do
+            gh pr close "$pr" --comment "Closed by .github/workflows/onecrl.yml: today's OneCRL and CCADB give the list main already holds, so this PR's content is stale."
+          done
+
+      # spec: .github/workflows/onecrl.yml -- automerge lands a green PR within hours; one open past 2 days
+      #       (172800 s) has red or stuck checks, so this fails the run, naming it, every day until it's handled.
+      - name: Fail on a pull request that has not merged in 2 days
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          stuck="$(gh pr list --head onecrl/update --base main --state open --json number,createdAt,url \
+            --jq '.[] | select(now - (.createdAt | fromdateiso8601) > 172800) | "#\(.number), opened \(.createdAt): \(.url)"')"
+          if [ -n "$stuck" ]; then
+            echo "::error::the onecrl/update PR has not merged in 2 days; its checks are red or stuck: $stuck"
+            exit 1
+          fi

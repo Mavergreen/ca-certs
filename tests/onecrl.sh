@@ -270,4 +270,17 @@ propose="$(sed -n '/^  propose:/,$p' "$Y")"
 ! printf '%s\n' "$propose" | grep -v '^[[:space:]]*#' | grep -Eq '(sh|python3[^ ]*) +([^ ]+ +)*[^ ]*build/onecrl\.(sh|py)' \
   || fail "the propose job, which holds the App token, must not run the generator: it reads no upstream bytes"
 
+scenario "the bot's run goes red on what the PR's checks would refuse, and on a PR that never merges"
+generate="$(sed -n '/^  generate:/,/^  propose:/p' "$Y" | grep -v '^[[:space:]]*#')"
+printf '%s\n' "$generate" | grep -q '^ *sh tests/blocked\.sh$' || fail "the generate job must run sh tests/blocked.sh on what it generated"
+printf '%s\n' "$generate" | grep -q '^ *sh build/build-bundle\.sh$' || fail "the generate job must run sh build/build-bundle.sh, whose refusals (trusted by Mozilla, AquaTransport conflicts) the PR's build would hit"
+code="$(printf '%s\n' "$propose" | grep -v '^[[:space:]]*#')"
+! printf '%s\n' "$code" | grep -Eq '(^|[;&|] *| )(sh|bash|python3[^ ]*) +[^ ]*(build|tests)/' \
+  || fail "the propose job, which holds the App token, must run no repo code"
+! printf '%s\n' "$propose" | sed -n '1,/steps:/p' | grep -q "if: needs.generate.outputs.changed == 'true'" \
+  || fail "the propose job must run when nothing changed too, to close a stale onecrl/update PR"
+printf '%s\n' "$code" | grep -q 'gh pr close' || fail "the propose job must close an open onecrl/update PR when the generated list equals main"
+printf '%s\n' "$code" | grep -q 'createdAt' && printf '%s\n' "$code" | grep -q '172800' \
+  || fail "the propose job must fail when an open onecrl/update PR was created more than 2 days (172800 s) ago"
+
 echo "onecrl: ok"
