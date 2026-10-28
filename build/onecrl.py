@@ -231,9 +231,20 @@ def generate(onecrl_path, ccadb_paths, now, repo, allow_mass_removal):
             return
 
     stale = [s for s in current if s not in kept]
-    if current and len(stale) > MAX_REMOVAL * len(current) and not allow_mass_removal:
-        raise Refusal('mass removal: this run would remove %d of the %d certificates in blocked/; '
-                      'rerun with --allow-mass-removal if that is real' % (len(stale), len(current)))
+    # spec: docs/TRUST-POLICY.md #14 -- the guard is for bad input, and expiries are no sign of it. They
+    #       accumulate while no real change comes (they ride along), so counting them would trip the guard on
+    #       the next real change. A removal counts only when the certificate may still be unexpired: CCADB
+    #       still lists it with a later Valid To, or CCADB no longer lists it and its committed row's
+    #       Expires year is this year or later (the row gives only a year, so this year counts as unexpired).
+    years = {}
+    for line in (committed_md or '').splitlines():
+        m = re.match(r'^\| .* \| `([0-9A-F]{64})` \| .* \| (\d{4}) \|$', line)
+        if m:
+            years[m.group(1)] = int(m.group(2))
+    unexpired = [s for s in stale if (found[s]['until'] > now if s in found else years.get(s, now.year) >= now.year)]
+    if current and len(unexpired) > MAX_REMOVAL * len(current) and not allow_mass_removal:
+        raise Refusal('mass removal: this run would remove %d unexpired of the %d certificates in blocked/; '
+                      'rerun with --allow-mass-removal if that is real' % (len(unexpired), len(current)))
     md, entries = render(kept, unmatched, recent, unreadable)
     write_all(repo, kept, stale, md, entries)
 

@@ -211,7 +211,7 @@ d['data'].append({'id': 'rec-w', 'last_modified': 1, 'issuerName': sys.argv[3], 
 json.dump(d, open(sys.argv[2], 'w'))
 PY
 cp -R "$T/before" "$T/swept"
-python3 -I "$G" --onecrl "$T/plusw.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --now 2029-07-01 --repo "$T/swept" --allow-mass-removal \
+python3 -I "$G" --onecrl "$T/plusw.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv" --now 2029-07-01 --repo "$T/swept" \
   > "$T/out" 2>&1 || fail "a run with a new block and six expiries failed: $(cat "$T/out")"
 [ "$(ls "$T/swept/blocked" | LC_ALL=C sort | tr '\n' ' ')" = "$(printf '%s.pem\n' "$S256_X" "$S256_Y" "$S256_W" | LC_ALL=C sort | tr '\n' ' ')" ] \
   || fail "a new block must bring in W and sweep out the six expired V certificates: $(ls "$T/swept/blocked")"
@@ -231,12 +231,30 @@ refuses() {  # REPO WHY ARG...: the generator exits 1 naming WHY and leaves REPO
 refuses "$T/repo" "fewer than 1000" --onecrl "$T/short.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv"
 refuses "$T/repo" "empty" --onecrl "$T/onecrl.json" --ccadb "$T/empty.csv" --ccadb "$T/all.csv"
 refuses "$T/repo" "PEM Info" --onecrl "$T/onecrl.json" --ccadb "$T/revoked.csv" --ccadb "$T/nopem.csv"
+# spec: build/onecrl.py MAX_REMOVAL -- only removals of unexpired certificates count: W (CCADB lists it, unexpired,
+#       but OneCRL no longer names it) and U (CCADB no longer lists it, no committed row says it expired) make 2 of
+#       11, over 10%; Z, expired by CCADB, doesn't count
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$T/U.key" -out "$T/U.pem" \
+  -days 30 -subj "/O=Test Org/CN=Sub U" >/dev/null 2>&1
+S256_U="$(fp sha256 U)"
 mkdir "$T/mass"; cp -R "$T/repo/blocked" "$T/mass/"
-cp "$T/Z.pem" "$T/mass/blocked/$S256_Z.pem"; cp "$T/W.pem" "$T/mass/blocked/$S256_W.pem"
+cp "$T/Z.pem" "$T/mass/blocked/$S256_Z.pem"; cp "$T/W.pem" "$T/mass/blocked/$S256_W.pem"; cp "$T/U.pem" "$T/mass/blocked/$S256_U.pem"
 refuses "$T/mass" "mass removal" --onecrl "$T/onecrl.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv"
+grep -q "remove 2 unexpired" "$T/out" || fail "the guard must count only the 2 unexpired removals, not expired Z: $(cat "$T/out")"
 gen "$T/mass" --allow-mass-removal > "$T/out" 2>&1 || fail "--allow-mass-removal still refused: $(cat "$T/out")"
-[ ! -f "$T/mass/blocked/$S256_Z.pem" ] && [ ! -f "$T/mass/blocked/$S256_W.pem" ] || fail "--allow-mass-removal kept stale files"
+[ ! -f "$T/mass/blocked/$S256_Z.pem" ] && [ ! -f "$T/mass/blocked/$S256_W.pem" ] && [ ! -f "$T/mass/blocked/$S256_U.pem" ] || fail "--allow-mass-removal kept stale files"
 diff -r "$T/before/blocked" "$T/mass/blocked" || fail "--allow-mass-removal left a different blocked/"
+
+scenario "a certificate CCADB no longer lists counts toward the guard unless its committed row has expired"
+gone() {  # YEAR: a copy of before/ that also blocks U, which CCADB doesn't list, its row expiring in YEAR
+  rm -rf "$T/gone"; cp -R "$T/before" "$T/gone"; cp "$T/U.pem" "$T/gone/blocked/$S256_U.pem"
+  printf '| Sub U, signed by Test Org | `%s` | [1](https://bugzilla.mozilla.org/show_bug.cgi?id=1) | %s |\n' "$S256_U" "$1" >> "$T/gone/blocked.md"
+}
+gone 2031
+refuses "$T/gone" "mass removal" --onecrl "$T/onecrl.json" --ccadb "$T/revoked.csv" --ccadb "$T/all.csv"
+gone 2025
+gen "$T/gone" > "$T/out" 2>&1 || fail "removing a certificate whose committed row expired in 2025 tripped the guard: $(cat "$T/out")"
+diff -r "$T/before" "$T/gone" || fail "the expired U must be swept, leaving the fresh output"
 
 scenario "names the CCADB rows it cannot read"
 mkdir "$T/unread"

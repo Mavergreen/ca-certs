@@ -122,6 +122,8 @@ check_blocked() {  # LABEL RELEASE: every shipped blocked intermediate is denied
   # spec: .superpowers/specs/2026-10-28-onecrl-feed-design.md section 4 "Migrating" -- 3.132.0-mavericks.3 imported the eMudhra ones into System.keychain and recorded them imported; they stay until uninstall, which the before/after keychain check below proves deletes them
   sed -n 's/^imported //p' "$RECEIPT" | LC_ALL=C sort -u > "$T/blocked.receipt-imported"
   comm -12 "$T/blocked.sha1" "$T/blocked.receipt-imported" > "$T/blocked.ours"
+  # spec: docs/TRUST-POLICY.md #14 -- only an upgrade from a release that imported them may leave any in a keychain; a fresh install imports none
+  [ -n "$PREV" ] || [ ! -s "$T/blocked.ours" ] || fail "after the $1, with no previous release, the receipt records $(wc -l < "$T/blocked.ours" | tr -d ' ') blocked intermediates imported, first: $(head -1 "$T/blocked.ours")"
   comm -23 "$T/blocked.inkc" "$T/blocked.ours" > "$T/blocked.stray"
   [ ! -s "$T/blocked.stray" ] || fail "after the $1, $(wc -l < "$T/blocked.stray" | tr -d ' ') blocked intermediates are in a keychain without an imported line in the receipt, first: $(head -1 "$T/blocked.stray")"
   comm -13 "$T/blocked.inkc" "$T/blocked.ours" > "$T/blocked.gone"

@@ -372,8 +372,9 @@ making the decision, not ca-certs, and following it automatically keeps it that 
 subject and key, never by the certificate itself, and a trust setting needs the certificate. So the
 generator matches OneCRL against CCADB's reports of intermediates, which carry each certificate. It
 refuses, and changes nothing, when OneCRL has fewer than 1,000 records, when a download is empty or
-doesn't parse, or when a run would remove more than 10% of `blocked/` at once. OneCRL entries leave
-only when their certificates expire, so a large removal means bad input. A real one goes through a
+doesn't parse, or when a run would remove more than 10% of `blocked/` at once, counting only
+certificates that haven't expired. OneCRL entries leave only when their certificates expire, so a
+large removal of unexpired ones means bad input. A real one goes through a
 manual run of `onecrl.yml` that allows it. Time alone cuts no release: when the only differences are
 certificates expiring or gap entries turning a year old, the files stay as they are, and expired
 entries are swept with the next real change.
