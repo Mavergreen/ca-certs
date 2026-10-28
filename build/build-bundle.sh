@@ -5,7 +5,7 @@
 #            ca-certificates.crt  every root Mozilla trusts for websites, each after "# label"
 #            trusted/SHA1.pem     the same roots, one file each, named by SHA-1 for the applier
 #            ca-certificates.sha1 the SHA-1 of each root in ca-certificates.crt, in its order
-#            distrust/SHA1.pem    one per withdrawn.md row, from withdrawn/SHA256.pem
+#            distrust/SHA1.pem    one per withdrawn.md and blocked.md row, from withdrawn/ and blocked/SHA256.pem
 #            roots.txt            "trusted|distrusted SHA256 label", sorted, for release notes
 #            aquatransport-roots.txt  the roots AquaTransport's root component claims, as committed
 # spec: tests/bundle-sanity.sh
@@ -32,20 +32,22 @@ for c in "$D"/split/*.pem; do
   printf '%s\n' "$s1" >> "$D/ca-certificates.sha1"
   printf 'trusted %s %s\n' "$s256" "$(cat "$c.label")" >> "$D/roots.unsorted"
 done
-sed -n 's/^| \(.*\) | `\([0-9A-F]\{64\}\)` | .*/\2 \1/p' "$MAVERICKS_ROOT/withdrawn.md" > "$D/withdrawn.rows"
-[ -s "$D/withdrawn.rows" ] || build_die "withdrawn.md lists no roots"
-while read -r s256 name; do
-  f="$MAVERICKS_ROOT/withdrawn/$s256.pem"
-  [ -f "$f" ] || build_die "withdrawn.md lists $name ($s256) but withdrawn/$s256.pem is missing"
-  s1="$(ca_fingerprint sha1 "$f")" || build_die "$f does not parse"
-  [ ! -f "$D/trusted/$s1.pem" ] || build_die "$name is trusted by Mozilla and listed in withdrawn.md"
-  cp "$f" "$D/distrust/$s1.pem"
-  printf 'distrusted %s %s\n' "$s256" "$name" >> "$D/roots.unsorted"
-done < "$D/withdrawn.rows"
+for list in withdrawn blocked; do
+  sed -n 's/^| \(.*\) | `\([0-9A-F]\{64\}\)` | .*/\2 \1/p' "$MAVERICKS_ROOT/$list.md" > "$D/$list.rows"
+  [ -s "$D/$list.rows" ] || build_die "$list.md lists nothing"
+  while read -r s256 name; do
+    f="$MAVERICKS_ROOT/$list/$s256.pem"
+    [ -f "$f" ] || build_die "$list.md lists $name ($s256) but $list/$s256.pem is missing"
+    s1="$(ca_fingerprint sha1 "$f")" || build_die "$f does not parse"
+    [ ! -f "$D/trusted/$s1.pem" ] || build_die "$name is trusted by Mozilla and listed in $list.md"
+    cp "$f" "$D/distrust/$s1.pem"
+    printf 'distrusted %s %s\n' "$s256" "$name" >> "$D/roots.unsorted"
+  done < "$D/$list.rows"
+done
 sort "$D/roots.unsorted" > "$D/roots.txt"
 cp "$MAVERICKS_ROOT/aquatransport-roots.txt" "$D/aquatransport-roots.txt"
 sh "$MAVERICKS_ROOT/build/aquatransport-conflicts.sh" "$D/aquatransport-roots.txt" "$D/trusted" "$D/distrust" \
   "$MAVERICKS_ROOT/aquatransport-differences.txt" \
   || build_die "AquaTransport's root list disagrees with this release (above)"
-rm -rf "$D/split" "$D/roots.unsorted" "$D/withdrawn.rows"
+rm -rf "$D/split" "$D/roots.unsorted" "$D/withdrawn.rows" "$D/blocked.rows"
 echo "build-bundle: $(grep -c '^trusted ' "$D/roots.txt") trusted, $(grep -c '^distrusted ' "$D/roots.txt") distrusted" >&2

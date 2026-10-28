@@ -7,6 +7,7 @@ what other products can rely on once it's installed, and how to uninstall it.
 |---|---|---|---|
 | Mozilla NSS `certdata.txt` (own upstream) | `NSS_TAG` (`NSS_x_y[_z]_RTM`) | ✅ custom datasource on Mozilla's release directory (`ftp.mozilla.org/pub/security/nss/releases/`), regex versioning. Not `mozilla/nss`'s tags: a tag can precede its tarball and `SHA256SUMS` by hours (3.132: 18:20 tag, 23:12 files), and a bump proposed in between fails its build with nothing to re-run it | `build/version.sh` cuts `<x.y.z>-mavericks.1` |
 | Withdrawn roots | `withdrawn.md` + `withdrawn/` | not an ingredient: our own reviewed policy | a change moves the declared state below; the nightly backstop re-cuts it, or `workflow_dispatch local_release=true` ships it immediately |
+| Blocked intermediates | `blocked.md` + `blocked/` | ❌ untrackable by Renovate for now: copied by hand from Mozilla's OneCRL, which publishes no certificates, only names and keys, so no datasource can move a pinned file | add a row and its certificate; that moves the declared state below and cuts a release |
 | AquaTransport's root list | `aquatransport-roots.txt` | ❌ untrackable by Renovate: the DMG's URL is overwritten in place, so no feed names a release. `aquatransport-roots.yml` compares it with the live DMG daily and goes red when they differ | regenerate with `build/aquatransport-roots.sh`, read the difference, commit; that moves the declared state below and cuts a release |
 | MacOSX SDK, Sparkle, packaging helpers | `Mavergreen/shipyard@v1` | ✅ github-actions manager | `@v1` moves without a pin change; nothing repackages by itself |
 
@@ -22,10 +23,14 @@ needs no hand-pasted hash.
 - upstream: NSS_TAG
 - withdrawn: withdrawn.md
 - aquatransport-roots: aquatransport-roots.txt
+- blocked: blocked.md
 
 `withdrawn.md` is declared because a change to it is a change to what machines trust, and should
 ship. Its certificates in `withdrawn/` are pinned by the fingerprints `withdrawn.md` lists
 (`tests/withdrawn.sh`).
+
+`blocked.md` is declared for the same reason, with its certificates in `blocked/` pinned the same way
+(`tests/blocked.sh`).
 
 `aquatransport-roots.txt` is declared for the same reason: it decides which trust settings ca-certs
 leaves to AquaTransport (docs/TRUST-POLICY.md #12).

@@ -19,6 +19,7 @@ Measured on 2026-09-25, on a real Mac OS X 10.9.5 machine, against NSS 3.130.
 5. Only CAs Mozilla withdrew for misbehavior.
 6. Distrust applies to secure websites (TLS) only.
 7. Apple's own roots are never distrusted, and Apple's files are never edited.
+14. Intermediates Mozilla blocks in OneCRL are distrusted for TLS too.
 
 **How your Mac is changed**
 
@@ -348,3 +349,35 @@ hostname, doesn't count.
 - **A deny made after the last install or update.** It reaches the bundle at the next one.
 
 **Reconsider when:** a Mavergreen product needs the bundle to also leave out roots a user has denied.
+
+## 14. Intermediates Mozilla blocks in OneCRL are distrusted for TLS too
+
+**Decision:** each intermediate certificate `blocked.md` lists is distrusted for secure websites
+(TLS), the same way as a withdrawn root (#6). `blocked.md` copies Mozilla's OneCRL, its list of
+intermediates Firefox refuses, citing the Mozilla bug behind each entry.
+
+**Why:** Mozilla publishes its trust decisions in two places. `certdata.txt` says which roots to
+trust, and ca-certs follows it (#1). OneCRL blocks intermediates, and ca-certs didn't read it. When
+eMudhra's intermediates turned out to have recoverable private keys (October 2026, bug
+[2083382](https://bugzilla.mozilla.org/show_bug.cgi?id=2083382)), Mozilla blocked them in OneCRL.
+Sectigo had cross-signed them from AAA Certificate Services, which 10.9 trusts and Apple no longer
+updates. So without this, a 10.9 Mac with ca-certs still accepted them. Following OneCRL is Mozilla
+making the decision, not ca-certs.
+
+**Instead of:**
+
+| Alternative | Why not |
+|---|---|
+| Distrust AAA Certificate Services | Mozilla blocked the intermediates, not the root, and 10.9's own TLS code may still need AAA for Sectigo's older chains. |
+| Wait for Apple | Apple doesn't update 10.9. |
+
+**What this doesn't cover:**
+
+- **The bundle.** A PEM bundle lists only roots, so programs that read it (OpenSSL, `curl` built on
+  it) can't see a blocked intermediate. They're safe from eMudhra's only because Mozilla also
+  removed the roots those intermediates chain to.
+- **OneCRL entries named by issuer and serial number alone.** A trust setting needs the certificate,
+  so `blocked.md` lists every certificate published for each entry.
+
+**Reconsider when:** ca-certs reads OneCRL directly, so `blocked.md` is generated rather than kept by
+hand. Until then, a new OneCRL entry reaches ca-certs only when a person adds it.

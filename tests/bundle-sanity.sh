@@ -17,6 +17,10 @@ for f in "$D"/trusted/*.pem "$D"/distrust/*.pem; do
   s="$(openssl x509 -noout -fingerprint -sha1 -in "$f" | sed 's/.*=//' | tr -d :)" || fail "$f does not parse"
   [ "$(basename "$f" .pem)" = "$s" ] || fail "$f is named for another certificate (its SHA-1 is $s)"
 done
+for f in "$R"/blocked/*.pem; do
+  s="$(openssl x509 -noout -fingerprint -sha1 -in "$f" | sed 's/.*=//' | tr -d :)" || fail "$f does not parse"
+  [ -f "$D/distrust/$s.pem" ] || fail "blocked/$(basename "$f") is not distrusted by this release"
+done
 for f in "$D"/distrust/*.pem; do
   [ ! -f "$D/trusted/$(basename "$f")" ] || fail "$(basename "$f") is both trusted and distrusted"
 done
