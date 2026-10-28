@@ -51,7 +51,7 @@ probe_cert() {  # HOST: fail only when curl cannot verify the certificate (exit 
 snap() {
   # the export, not dump-trust-settings: the dump omits admin entries whose certificate is in no keychain (every blocked one)
   : > "$1.admin.xml"
-  if security trust-settings-export -d "$1.admin.plist" >/dev/null 2>&1; then plutil -convert xml1 -o - "$1.admin.plist" > "$1.admin.xml" || : > "$1.admin.xml"; fi
+  if security trust-settings-export -d "$1.admin.plist" >/dev/null 2>&1; then plutil -convert xml1 -o - "$1.admin.plist" | awk '/<key>modDate<\/key>/ { skip = 1; next } skip { skip = 0; next } { print }' > "$1.admin.xml" || : > "$1.admin.xml"; fi  # modDate lines dropped: an import may rewrite dates of entries it carries through
   sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p' "$1.admin.xml" | LC_ALL=C sort > "$1.admin"
   security find-certificate -a -Z /Library/Keychains/System.keychain | grep '^SHA-1' | sort > "$1.kc"
 }
@@ -98,12 +98,16 @@ check_bundle() {  # LABEL RELEASE: the contract bundle is the shipped one, less 
   bundle_sha1s "$TREE/etc/openssl/certs/ca-certificates.crt" > "$T/in"
   diff "$T/want-in" "$T/in" >&2 || fail "after the $1, the bundle is not the shipped one less the denied roots (diff above)"
 }
-check_blocked() {  # LABEL: every shipped blocked intermediate is denied for TLS, with a setting and without a keychain home
+check_blocked() {  # LABEL RELEASE: every shipped blocked intermediate is denied for TLS, with a setting and without a keychain home
   _bd="$TREE/share/ca-certs/blocked"
-  ls "$_bd"/*.pem >/dev/null 2>&1 || return 0   # a release before the blocked set ships none
+  if ! ls "$_bd"/*.pem >/dev/null 2>&1; then
+    [ "$2" = prev ] && return 0   # an older release ships no blocked set
+    fail "after the $1, the release ships no share/ca-certs/blocked/*.pem"
+  fi
   for c in "$_bd"/*.pem; do
     openssl x509 -noout -fingerprint -sha1 -in "$c" | sed 's/.*=//' | tr -d :
   done | LC_ALL=C sort > "$T/blocked.sha1"
+  [ -s "$T/blocked.sha1" ] || fail "after the $1, openssl read no SHA-1 from any shipped blocked pem"
   sed -n 's/.*<key>\([0-9A-F]\{40\}\)<\/key>.*/\1/p' "$T/$1.admin.xml" | LC_ALL=C sort > "$T/blocked.keys"
   comm -23 "$T/blocked.sha1" "$T/blocked.keys" > "$T/blocked.missing"
   [ ! -s "$T/blocked.missing" ] || fail "after the $1, the admin trust settings export has no key for $(wc -l < "$T/blocked.missing" | tr -d ' ') shipped blocked intermediates, first: $(head -1 "$T/blocked.missing")"
@@ -113,6 +117,7 @@ check_blocked() {  # LABEL: every shipped blocked intermediate is denied for TLS
   # the installer must not have imported any of them into System.keychain or the login/default keychain
   { security find-certificate -a -Z /Library/Keychains/System.keychain 2>/dev/null || :; security find-certificate -a -Z 2>/dev/null || :; } \
     | sed -n 's/^SHA-1 hash: //p' | LC_ALL=C sort -u > "$T/blocked.kc"
+  [ -s "$T/blocked.kc" ] || fail "after the $1, the keychain lookup listed no certificates at all (System.keychain always holds some), so it cannot show the blocked ones are absent"
   comm -12 "$T/blocked.sha1" "$T/blocked.kc" > "$T/blocked.imported"
   [ ! -s "$T/blocked.imported" ] || fail "after the $1, blocked intermediates are in a keychain, first: $(head -1 "$T/blocked.imported")"
   echo "acceptance-onbox: after the $1: $(wc -l < "$T/blocked.sha1" | tr -d ' ') blocked intermediates denied for TLS, in the admin settings, in no keychain"
@@ -130,7 +135,7 @@ expect_installed() {  # LABEL RELEASE: with RELEASE installed, every root's verd
   else
     grep -qx 'keychain yes' "$RECEIPT" || fail "after the $1 on Mac OS X $os, the receipt must say the keychain was changed: $(cat "$RECEIPT")"
     snap "$T/$1"
-    check_blocked "$1"
+    check_blocked "$1" "$2"
   fi
   bad="$(while read -r n v; do
     if [ "$mode" = bundle ]; then
